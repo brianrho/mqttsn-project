@@ -33,13 +33,13 @@ class MQTTSNClient:
         self.gateway_list = []
         self.curr_gateway = None
 
-        # store connect msg so we can use it when retrying
-        self.connect_inflight = None
         self.connected = False
 
         self.state_handlers = []
         self.msg_handlers = []
 
+        # store unicast msg so we can use it when retrying
+        self.msg_inflight = None
         self.unicast_timer = time.time()
         self.unicast_counter = 0
 
@@ -59,8 +59,8 @@ class MQTTSNClient:
         # for messages that expect a reply
         self.curr_msg_id = 0
 
-        self.register_inflight = None
         self.topics = [None] * MQTTSN_MAX_NUM_TOPICS
+        self.num_topics = 0
 
     def add_gateway(self, gwid, gwaddr):
         self.gateway_list.append(MQTTSNGWInfo(gwid, gwaddr))
@@ -70,6 +70,10 @@ class MQTTSNClient:
         # so that the updated states get selected
         self._handle_messages()
 
+        # check up on any messages awaiting a reply
+        self._inflight_handler()
+
+        # run state handler
         state_val = self.state.value
         self.state_handlers[state_val]()
 
@@ -96,13 +100,17 @@ class MQTTSNClient:
             # call the msg handler
             self.msg_handlers[idx](pkt[rlen:], from_addr)
 
-    def _connect_in_progress_handler(self):
+    def _inflight_handler(self):
+        if self.msg_inflight is None:
+            return
+
         # check if we've timed out after Nretry * Tretry secs
         if time.time() - self.unicast_timer >= MQTTSN_T_RETRY:
             self.unicast_timer = time.time()
             self.unicast_counter += 1
             if self.unicast_counter > MQTTSN_N_RETRY:
                 self.connected = False
+                self.msg_inflight = None
                 self.state = MQTTSNState.LOST
 
                 # Mark gateway as unavailable
@@ -113,27 +121,38 @@ class MQTTSNClient:
 
                 return False
 
-            # resend connect
-            raw = self.connect_inflight.pack()
-            self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+            # resend msg
+            self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
             return False
 
     def _handle_connack(self, pkt, from_addr):
-        # make sure its from the right gateway
-        # to be reviewed later, this cmp may not be worth it
         if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
             return False
 
+        if self.msg_inflight is None:
+            return False
+
+        # unpack the original connect
+        header = MQTTSNHeader()
+        hlen = header.unpack(self.msg_inflight)
+        if header.msg_type != MQTTSNMessageConnect:
+            return False
+
+        sent = MQTTSNMessageConnect()
+        sent.unpack(self.msg_inflight[hlen:])
+
+        # now unpack the connack
         msg = MQTTSNMessageConnack()
         if not msg.unpack(pkt):
             return False
         if msg.return_code != MQTTSN_RC_ACCEPTED:
-            self.connect_inflight = None
+            self.msg_inflight = None
             self.state = MQTTSNState.DISCONNECTED
             return False
 
         self.state = MQTTSNState.ACTIVE
         self.connected = True
+        self.msg_inflight = None
         self.last_transaction = time.time()
         return True
 
@@ -193,24 +212,27 @@ class MQTTSNClient:
         return True
 
     def connect(self, gwid=0, flags=0, duration=MQTTSN_DEFAULT_KEEPALIVE):
-        self.connect_inflight = MQTTSNMessageConnect()
-        self.connect_inflight.flags = flags
-        self.connect_inflight.client_id = self.client_id
-        self.connect_inflight.duration = duration
+        if self.msg_inflight:
+            return False
+        
+        msg = MQTTSNMessageConnect()
+        msg.flags = flags
+        msg.client_id = self.client_id
+        msg.duration = duration
         self.keep_alive_duration = duration
 
         # check if we have the target gw in our list
-        raw = self.connect_inflight.pack()
+        self.msg_inflight = msg.pack()
         for info in self.gateway_list:
             if info.gwid == gwid:
                 self.curr_gateway = info
                 break
         else:
-            self.connect_inflight = None
+            self.msg_inflight = None
             return False
 
         # send the msg to the gw, start timers
-        self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+        self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
         self.state = MQTTSNState.CONNECT_IN_PROGRESS
         self.unicast_timer = time.time()
         self.unicast_counter = 0
@@ -218,18 +240,18 @@ class MQTTSNClient:
 
     def register_topic(self, topic):
         # if we're not connected or theres a pending register
-        if not self.is_connected() or self.register_inflight:
+        if not self.is_connected() or self.msg_inflight:
             return False
 
-        self.register_inflight = MQTTSNMessageRegister()
-        self.register_inflight.topic_name = topic
-        self.register_inflight.topic_id = 0
+        msg = MQTTSNMessageRegister()
+        msg.topic_name = topic
+        msg.topic_id = 0
         # 0 is reserved for message IDs
         self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
-        self.register_inflight.msg_id = self.curr_msg_id
+        msg.msg_id = self.curr_msg_id
 
-        raw = self.register_inflight.pack()
-        self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+        self.msg_inflight = msg.pack()
+        self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
         self.unicast_timer = time.time()
         self.unicast_counter = 0
 
@@ -242,13 +264,30 @@ class MQTTSNClient:
         if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
             return False
 
+        if self.msg_inflight is None:
+            return False
+
+        # unpack the original message
+        header = MQTTSNHeader()
+        hlen = header.unpack(self.msg_inflight)
+        if header.msg_type != MQTTSNMessageRegister:
+            return False
+
+        sent = MQTTSNMessageRegister()
+        sent.unpack(self.msg_inflight[hlen:])
+
+        # now unpack the response
         msg = MQTTSNMessageRegack()
         if not msg.unpack(pkt):
             return False
-        if msg.return_code != MQTTSN_RC_ACCEPTED:
+        if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
             return False
 
         self.last_transaction = time.time()
+        self.topics[self.num_topics].name = sent.topic_name
+        self.topics[self.num_topics].name = sent.topic_id
+        self.msg_inflight = None
+        self.num_topics += 1
         return True
 
     def _handle_pingresp(self, pkt, from_addr):
@@ -277,6 +316,33 @@ class MQTTSNClient:
                     self.ping()
                     self.pingreq_timer = time.time()
 
+    def publish(self, topic, data, flags=None):
+        # if we're not connected
+        if not self.is_connected():
+            return False
+
+        msg = MQTTSNMessagePublish()
+        for t in self.topics:
+            if t.name == topic:
+                msg.topic_id = t.tid
+                break
+        else:
+            return False
+
+        # msgid = 0 for qos 0
+        if flags.qos in (1, 2):
+            # 0 is reserved for message IDs
+            self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+            msg.msg_id = self.curr_msg_id
+
+        msg.flags = flags
+        msg.data = data
+        raw = msg.pack()
+        self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+
+        # always a 16-bit value
+        self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
+
     def ping(self):
         if not self.connected:
             return
@@ -285,6 +351,13 @@ class MQTTSNClient:
         raw = msg.pack()
         self.transport.write_packet(raw, self.curr_gateway.gwaddr)
         self.pingreq_timer = time.time()
+
+    def transaction_pending(self):
+        if self.msg_inflight is None:
+            return False
+
+        self.loop()
+        return self.msg_inflight is not None
 
     def is_connected(self):
         if self.connected:
