@@ -394,7 +394,7 @@ class MQTTSNMessageSuback(MQTTSNMessage):
             return False
 
 
-class MQTTSNMessageUnubscribe(MQTTSNMessage):
+class MQTTSNMessageUnsubscribe(MQTTSNMessage):
     def __init__(self):
         super().__init__()
         self.flags = MQTTSNFlags()
@@ -511,7 +511,7 @@ if __name__ == "__main__":
                  MQTTSNMessagePingresp, MQTTSNMessagePuback, MQTTSNMessagePublish,
                  MQTTSNMessageRegack, MQTTSNMessageRegister, MQTTSNMessageSearchGW,
                  MQTTSNMessageSuback, MQTTSNMessageSubscribe, MQTTSNMessageUnsuback,
-                 MQTTSNMessageUnubscribe]
+                 MQTTSNMessageUnsubscribe]
 
     for obj in test_objs:
         obj1 = obj()

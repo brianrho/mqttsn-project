@@ -1,15 +1,17 @@
 from mqttsn_transport_udp import MQTTSNTransportUDP
+import time
 
+own_port = 20000
+gw = MQTTSNTransportUDP(own_port, b'\x01')
 
-own_port = 10000
-gw = MQTTSNTransportUDP(own_port)
 print("Starting server.")
 while True:
     try:
+        time.sleep(1)
         read, addr = gw.read_packet()
         if not read:
             continue
-        print("Recvd: ", read.decode(), "from", addr)
+        print("Recvd: ", read.decode(), "from", addr.bytes)
         gw.write_packet(b"Echo: " + read, addr)
     except KeyboardInterrupt:
         break

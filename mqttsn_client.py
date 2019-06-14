@@ -285,7 +285,7 @@ class MQTTSNClient:
 
         self.last_transaction = time.time()
         self.topics[self.num_topics].name = sent.topic_name
-        self.topics[self.num_topics].name = sent.topic_id
+        self.topics[self.num_topics].name = msg.topic_id
         self.msg_inflight = None
         self.num_topics += 1
         return True
@@ -343,6 +343,125 @@ class MQTTSNClient:
         # always a 16-bit value
         self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
 
+    def subscribe(self, topic, flags=None):
+        # if we're not connected or there's a pending transaction
+        if not self.is_connected() or self.msg_inflight:
+            return False
+
+        msg = MQTTSNMessageSubscribe()
+        msg.topic_id_name = topic
+
+        # 0 is reserved for message IDs
+        self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+        msg.msg_id = self.curr_msg_id
+        msg.flags = flags
+
+        self.msg_inflight = msg.pack()
+        self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
+        self.unicast_timer = time.time()
+        self.unicast_counter = 0
+
+        # always a 16-bit value
+        self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
+
+    def _handle_suback(self, pkt, from_addr):
+        # if this is to be used as proof of connectivity,
+        # then we must verify that the gateway is the right one
+        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+            return False
+
+        if self.msg_inflight is None:
+            return False
+
+        # unpack the original message
+        header = MQTTSNHeader()
+        hlen = header.unpack(self.msg_inflight)
+        if header.msg_type != MQTTSNMessageSubscribe:
+            return False
+
+        sent = MQTTSNMessageSubscribe()
+        sent.unpack(self.msg_inflight[hlen:])
+
+        # now unpack the response
+        msg = MQTTSNMessageSuback()
+        if not msg.unpack(pkt):
+            return False
+        if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
+            return False
+
+        self.last_transaction = time.time()
+        self.topics[self.num_topics].name = sent.topic_id_name
+        self.topics[self.num_topics].name = msg.topic_id
+        self.msg_inflight = None
+        self.num_topics += 1
+        return True
+
+    def unsubscribe(self, topic, flags=None):
+        # if we're not connected or there's a pending transaction
+        if not self.is_connected() or self.msg_inflight:
+            return False
+
+        msg = MQTTSNMessageUnsubscribe()
+
+        for t in self.topics:
+            if t.name == topic:
+                msg.topic_id_name = topic
+                break
+        else:
+            return False
+
+        # 0 is reserved
+        self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+        msg.msg_id = self.curr_msg_id
+        msg.flags = flags
+
+        self.msg_inflight = msg.pack()
+        self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
+        self.unicast_timer = time.time()
+        self.unicast_counter = 0
+
+        # always a 16-bit value
+        self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
+
+    def _handle_unsuback(self, pkt, from_addr):
+        # if this is to be used as proof of connectivity,
+        # then we must verify that the gateway is the right one
+        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+            return False
+
+        if self.msg_inflight is None:
+            return False
+
+        # unpack the original message
+        header = MQTTSNHeader()
+        hlen = header.unpack(self.msg_inflight)
+        if header.msg_type != MQTTSNMessageUnsubscribe:
+            return False
+
+        sent = MQTTSNMessageUnsubscribe()
+        sent.unpack(self.msg_inflight[hlen:])
+
+        # now unpack the response
+        msg = MQTTSNMessageUnsuback()
+        if not msg.unpack(pkt):
+            return False
+        if msg.msg_id != sent.msg_id:
+            return False
+
+        self.last_transaction = time.time()
+
+        # ##revise add and remove later
+        for topic in self.topics:
+            if topic.name == sent.topic_id_name:
+                self.topics.remove(topic)
+                break
+        else:
+            return False
+
+        self.msg_inflight = None
+        self.num_topics -= 1
+        return True
+
     def ping(self):
         if not self.connected:
             return
@@ -364,3 +483,13 @@ class MQTTSNClient:
             return True
 
         return self.loop()
+
+    def disconnect(self):
+        if not self.connected:
+            return
+
+        msg = MQTTSNMessageDisconnect()
+        raw = msg.pack()
+        self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+        self.connected = False
+        self.state = MQTTSNState.DISCONNECTED
