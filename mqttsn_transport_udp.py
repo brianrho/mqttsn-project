@@ -6,7 +6,7 @@ import socket
 
 
 class MQTTSNTransportUDP(MQTTSNTransport):
-    def __init__(self, port, local_addr):
+    def __init__(self, _port, local_addr):
         super().__init__()
 
         # Create a TCP/IP socket
@@ -17,8 +17,8 @@ class MQTTSNTransportUDP(MQTTSNTransport):
 
         # Bind the socket to the port
         self.local = local_addr
-        self.to_addr = ('<broadcast>', port)
-        self.sock.bind(('', port))
+        self.to_addr = ('<broadcast>', _port)
+        self.sock.bind(('', _port))
 
     def read_packet(self):
         try:
@@ -42,12 +42,15 @@ class MQTTSNTransportUDP(MQTTSNTransport):
         self.sock.sendto(data, self.to_addr)
         return len(data)
 
+    def end(self):
+        self.sock.close()
+
 
 if __name__ == '__main__':
     gw_addr = MQTTSNAddress(b'\x01')
 
-    own_port = 20000
-    clnt = MQTTSNTransportUDP(own_port, b'\x02')
+    port = 20000
+    clnt = MQTTSNTransportUDP(port, b'\x02')
     print("Starting client.")
     import time
 
@@ -61,4 +64,5 @@ if __name__ == '__main__':
                     print("Recvd: ", read.decode(), "from", addr.bytes)
                     break
         except KeyboardInterrupt:
+            clnt.end()
             break

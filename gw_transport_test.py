@@ -14,4 +14,5 @@ while True:
         print("Recvd: ", read.decode(), "from", addr.bytes)
         gw.broadcast(b"Echo: " + read)
     except KeyboardInterrupt:
+        gw.end()
         break
