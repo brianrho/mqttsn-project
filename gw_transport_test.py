@@ -12,6 +12,6 @@ while True:
         if not read:
             continue
         print("Recvd: ", read.decode(), "from", addr.bytes)
-        gw.write_packet(b"Echo: " + read, addr)
+        gw.broadcast(b"Echo: " + read)
     except KeyboardInterrupt:
         break

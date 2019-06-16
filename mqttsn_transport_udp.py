@@ -13,13 +13,12 @@ class MQTTSNTransportUDP(MQTTSNTransport):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        # self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, b'1')
         self.sock.setblocking(False)
 
         # Bind the socket to the port
         self.local = local_addr
-        self.address = ('', port)
-        self.sock.bind(self.address)
+        self.to_addr = ('<broadcast>', port)
+        self.sock.bind(('', port))
 
     def read_packet(self):
         try:
@@ -34,13 +33,13 @@ class MQTTSNTransportUDP(MQTTSNTransport):
 
     def write_packet(self, data, dest):
         data = self.local + dest.bytes + data
-        self.sock.sendto(data, ('<broadcast>', self.address[1]))
+        self.sock.sendto(data, self.to_addr)
         # from + to + data
         return len(data)
 
     def broadcast(self, data):
         data = self.local + b'\xff' + data
-        self.sock.sendto(data, ('<broadcast>', self.address[1]))
+        self.sock.sendto(data, self.to_addr)
         return len(data)
 
 
@@ -55,8 +54,7 @@ if __name__ == '__main__':
     while True:
         try:
             time.sleep(1)
-            clnt.broadcast(b'Hello world')
-            # clnt.write_packet(b"Hello world", gw_addr)
+            clnt.broadcast(b"Hello world")
             while True:
                 read, addr = clnt.read_packet()
                 if read:
