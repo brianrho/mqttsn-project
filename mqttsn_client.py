@@ -28,7 +28,8 @@ class MQTTSNGWInfo:
 
 class MQTTSNClient:
     # list of topics
-    topics: List[MQTTSNTopic] = [None] * MQTTSN_MAX_NUM_TOPICS
+    pub_topics: List[MQTTSNTopic] = [None] * MQTTSN_MAX_NUM_TOPICS
+    sub_topics: List[MQTTSNTopic] = [None] * MQTTSN_MAX_NUM_TOPICS
 
     # list of discovered gateways
     gateway_list: List[MQTTSNGWInfo] = []
@@ -208,7 +209,7 @@ class MQTTSNClient:
         msg.topic_name = topic
         msg.topic_id = 0
         # 0 is reserved for message IDs
-        self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+        self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
         msg.msg_id = self.curr_msg_id
 
         self.msg_inflight = msg.pack()
@@ -226,7 +227,7 @@ class MQTTSNClient:
 
         # get the topic id
         msg = MQTTSNMessagePublish()
-        for t in self.topics:
+        for t in self.pub_topics:
             if t.name == topic:
                 msg.topic_id = t.tid
                 break
@@ -236,7 +237,7 @@ class MQTTSNClient:
         # msgid = 0 for qos 0
         if flags.qos in (1, 2):
             # 0 is reserved
-            self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+            self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
             msg.msg_id = self.curr_msg_id
 
         msg.flags = flags
@@ -247,29 +248,6 @@ class MQTTSNClient:
         # always a 16-bit value
         self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
 
-    def _handle_publish(self, pkt, from_addr):
-        # wont check the gw address
-        # have faith that only our connected gw will send us msgs
-        if not self.curr_gateway:
-            return False
-
-        # now unpack the message
-        msg = MQTTSNMessagePublish()
-        if not msg.unpack(pkt) or msg.msg_id != 0x0000:
-            return False
-
-        # get the topic name
-        for t in self.topics:
-            if t.tid == msg.topic_id:
-                topic = t.name
-                break
-        else:
-            return False
-
-        # call user handler
-        self.publish_cb(topic, msg.data, msg.flags)
-        return True
-
     def subscribe(self, topic, flags=None):
         # if we're not connected or there's a pending transaction
         if not self.is_connected() or self.msg_inflight:
@@ -279,7 +257,7 @@ class MQTTSNClient:
         msg.topic_id_name = topic
 
         # 0 is reserved for message IDs
-        self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+        self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
         msg.msg_id = self.curr_msg_id
         msg.flags = flags
 
@@ -298,7 +276,7 @@ class MQTTSNClient:
 
         msg = MQTTSNMessageUnsubscribe()
 
-        for t in self.topics:
+        for t in self.sub_topics:
             if t.name == topic:
                 msg.topic_id_name = topic
                 break
@@ -306,7 +284,7 @@ class MQTTSNClient:
             return False
 
         # 0 is reserved
-        self.curr_msg_id = self.curr_msg_id + 1 if self.curr_msg_id == 0 else self.curr_msg_id
+        self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
         msg.msg_id = self.curr_msg_id
         msg.flags = flags
 
@@ -396,10 +374,10 @@ class MQTTSNClient:
             else:
                 self.gateway_list.append(MQTTSNGWInfo(msg.gwid, from_addr))
 
-        # we've gotten a GWINFO so we'll go back to being disconnected
-        # give the app a chance to now connect()
+        # we've gotten a GWINFO but we'll remain in this state
+        # till app tries to connect
         self.searchgw_pending = False
-        self.state = MQTTSNState.DISCONNECTED
+        # self.state = MQTTSNState.DISCONNECTED
         return True
 
     def _handle_connack(self, pkt, from_addr):
@@ -460,8 +438,8 @@ class MQTTSNClient:
 
         self.last_transaction = time.time()
         for i in range(MQTTSN_MAX_NUM_TOPICS):
-            if self.topics[i] is None:
-                self.topics[i] = MQTTSNTopic(sent.topic_name, msg.topic_id)
+            if self.pub_topics[i] is None:
+                self.pub_topics[i] = MQTTSNTopic(sent.topic_name, msg.topic_id)
                 break
         else:
             # no more space for new topics
@@ -469,6 +447,29 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics += 1
+        return True
+
+    def _handle_publish(self, pkt, from_addr):
+        # wont check the gw address
+        # have faith that only our connected gw will send us msgs
+        if not self.curr_gateway or not self.connected:
+            return False
+
+        # now unpack the message
+        msg = MQTTSNMessagePublish()
+        if not msg.unpack(pkt) or msg.msg_id != 0x0000:
+            return False
+
+        # get the topic name
+        for t in self.pub_topics:
+            if t.tid == msg.topic_id:
+                topic = t.name
+                break
+        else:
+            return False
+
+        # call user handler
+        self.publish_cb(topic, msg.data, msg.flags)
         return True
 
     # TODO: Consider removing suback and unsuback, no gain in parsing them
@@ -500,10 +501,9 @@ class MQTTSNClient:
         self.last_transaction = time.time()
 
         # add to the list
-        # TODO: Different lists for sub and pub topics
         for i in range(MQTTSN_MAX_NUM_TOPICS):
-            if self.topics[i] is None:
-                self.topics[i] = MQTTSNTopic(sent.topic_id_name, msg.topic_id)
+            if self.sub_topics[i] is None:
+                self.sub_topics[i] = MQTTSNTopic(sent.topic_id_name, msg.topic_id)
                 break
         else:
             # no more space for new topics
@@ -544,10 +544,10 @@ class MQTTSNClient:
         idx = 0
         count = 0
         while idx < MQTTSN_MAX_NUM_TOPICS and count < self.num_topics:
-            if self.topics[idx]:
+            if self.sub_topics[idx]:
                 count += 1
-                if self.topics[idx].name == sent.topic_id_name:
-                    self.topics[idx] = None
+                if self.sub_topics[idx].name == sent.topic_id_name:
+                    self.sub_topics[idx] = None
                     break
 
             idx += 1
