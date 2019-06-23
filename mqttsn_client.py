@@ -297,7 +297,7 @@ class MQTTSNClient:
         self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
 
     def ping(self):
-        if not self.connected:
+        if not self.connected or self.pingresp_pending:
             return
 
         msg = MQTTSNMessagePingreq()
@@ -408,7 +408,12 @@ class MQTTSNClient:
         self.state = MQTTSNState.ACTIVE
         self.connected = True
         self.msg_inflight = None
-        self.last_transaction = time.time()
+
+        # if we haven't sent a ping already,
+        # then no need to send one anytime soon
+        if not self.pingresp_pending:
+            self.last_transaction = time.time()
+
         return True
 
     def _handle_regack(self, pkt, from_addr):
@@ -447,6 +452,12 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics += 1
+
+        # if we haven't sent a ping already,
+        # then no need to send one anytime soon
+        if not self.pingresp_pending:
+            self.last_transaction = time.time()
+
         return True
 
     def _handle_publish(self, pkt, from_addr):
@@ -511,6 +522,12 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics += 1
+
+        # if we haven't sent a ping already,
+        # then no need to send one anytime soon
+        if not self.pingresp_pending:
+            self.last_transaction = time.time()
+
         return True
 
     def _handle_unsuback(self, pkt, from_addr):
@@ -538,8 +555,6 @@ class MQTTSNClient:
         if msg.msg_id != sent.msg_id:
             return False
 
-        self.last_transaction = time.time()
-
         # remove from list
         idx = 0
         count = 0
@@ -556,6 +571,12 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics -= 1
+
+        # if we haven't sent a ping already,
+        # then no need to send one anytime soon
+        if not self.pingresp_pending:
+            self.last_transaction = time.time()
+
         return True
 
     def _handle_pingresp(self, pkt, from_addr):
@@ -564,6 +585,7 @@ class MQTTSNClient:
             return False
 
         self.last_transaction = time.time()
+        self.pingresp_pending = False
         return True
 
     def _searching_handler(self):
