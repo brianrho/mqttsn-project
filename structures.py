@@ -28,7 +28,6 @@ class MQTTSNTopic:
     def __init__(self, name, tid=0):
         self.name = name
         self.tid = tid
-        self.known = False
 
 
 class MQTTSNHeader:
