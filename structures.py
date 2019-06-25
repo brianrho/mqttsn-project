@@ -25,9 +25,10 @@ TOPIC_NORMAL, TOPIC_PREDEFINED, TOPIC_SHORTNAME = range(3)
 
 
 class MQTTSNTopic:
-    def __init__(self, name, tid):
+    def __init__(self, name, tid=0):
         self.name = name
         self.tid = tid
+        self.known = False
 
 
 class MQTTSNHeader:

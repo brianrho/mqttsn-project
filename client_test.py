@@ -1,8 +1,8 @@
-from mqttsn_transport_udp import MQTTSNTransportUDP, MQTTSNAddress
+from mqttsn_transport_udp import MQTTSNTransportUDP
 from mqttsn_client import MQTTSNClient, MQTTSNState
 import time
 
-gw_addr = MQTTSNAddress(b'\x01')
+gw_addr = b'\x01'
 port = 20000
 transport = MQTTSNTransportUDP(port, b'\x02')
 print("Starting client.")
@@ -25,7 +25,7 @@ def init_tasks():
             yield
 
     for topic in out_topics:
-        clnt.subscribe(topic)
+        clnt.register(topic)
         while clnt.transaction_pending():
             yield
 

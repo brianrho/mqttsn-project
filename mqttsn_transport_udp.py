@@ -1,4 +1,4 @@
-from mqttsn_transport import MQTTSNTransport, MQTTSNAddress
+from mqttsn_transport import MQTTSNTransport
 from mqttsn_defines import MQTTSN_MAX_MSG_LEN
 import socket
 
@@ -6,7 +6,7 @@ import socket
 
 
 class MQTTSNTransportUDP(MQTTSNTransport):
-    def __init__(self, _port, local_addr):
+    def __init__(self, _port, own_addr):
         super().__init__()
 
         # Create a TCP/IP socket
@@ -16,7 +16,7 @@ class MQTTSNTransportUDP(MQTTSNTransport):
         self.sock.setblocking(False)
 
         # Bind the socket to the port
-        self.local = local_addr
+        self.own_addr = own_addr
         self.to_addr = ('<broadcast>', _port)
         self.sock.bind(('', _port))
 
@@ -27,18 +27,19 @@ class MQTTSNTransportUDP(MQTTSNTransport):
             return b'', None
 
         # make sure its for us or a broadcast, and that we didnt send it either
-        if data[1:2] in (self.local, b'\xff') and data[0:1] != self.local:
-            return data[2:], MQTTSNAddress(data[0:1])
+        if data[1:2] in (self.own_addr, b'\xff') and data[0:1] != self.own_addr:
+            return data[2:], data[0:1]
         return b'', None
 
     def write_packet(self, data, dest):
-        data = self.local + dest.bytes + data
-        self.sock.sendto(data, self.to_addr)
         # from + to + data
+        data = self.own_addr + dest + data
+        self.sock.sendto(data, self.to_addr)
         return len(data)
 
     def broadcast(self, data):
-        data = self.local + b'\xff' + data
+        # from + to + data
+        data = self.own_addr + b'\xff' + data
         self.sock.sendto(data, self.to_addr)
         return len(data)
 
@@ -47,7 +48,7 @@ class MQTTSNTransportUDP(MQTTSNTransport):
 
 
 if __name__ == '__main__':
-    gw_addr = MQTTSNAddress(b'\x01')
+    gw_addr = b'\x01'
 
     port = 20000
     clnt = MQTTSNTransportUDP(port, b'\x02')

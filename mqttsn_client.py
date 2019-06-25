@@ -1,7 +1,7 @@
 from typing import List, Callable
 
 from structures import *
-from mqttsn_transport import MQTTSNTransport, MQTTSNAddress
+from mqttsn_transport import MQTTSNTransport
 from enum import IntEnum, unique
 import time
 import random
@@ -20,7 +20,7 @@ class MQTTSNState(IntEnum):
 
 
 class MQTTSNGWInfo:
-    def __init__(self, gwid, gwaddr: MQTTSNAddress):
+    def __init__(self, gwid: int, gwaddr: bytes):
         self.gwid = gwid
         self.gwaddr = gwaddr
         self.available = True
@@ -38,7 +38,7 @@ class MQTTSNClient:
     publish_cb: Callable[[bytes, bytes, MQTTSNFlags], None] = None
 
     # handle incoming messages
-    msg_handlers: List[Callable[[bytes, MQTTSNAddress], bool]] = [None] * len(MSG_TYPES)
+    msg_handlers: List[Callable[[bytes, bytes], bool]] = [None] * len(MSG_TYPES)
 
     # handle client states
     state_handlers: List[Callable[[], None]] = [None] * len(MQTTSNState.__members__)
@@ -60,8 +60,9 @@ class MQTTSNClient:
 
         self.keep_alive_duration = MQTTSN_DEFAULT_KEEPALIVE
 
-        # last time we got a response from the gateway
-        self.last_transaction = 0
+        # keep track of time since unicast messages that expect a reply
+        self.last_out = 0
+        self.last_in = 0
 
         # tracking pings
         self.pingresp_pending = False
@@ -115,6 +116,8 @@ class MQTTSNClient:
         # run state handler
         if self.state_handlers[self.state] is not None:
             self.state_handlers[self.state]()
+
+        return self.state == MQTTSNState.ACTIVE
 
     def _handle_messages(self):
         while True:
@@ -180,27 +183,51 @@ class MQTTSNClient:
         msg.client_id = self.client_id
         msg.duration = duration
         self.keep_alive_duration = duration
-
-        # check if we have the target gw in our list
+        
+        # pack and store the msg for later retries
         self.msg_inflight = msg.pack()
-        for info in self.gateway_list:
-            if info.gwid == gwid:
-                self.curr_gateway = info
-                break
+        
+        # check if a valid GWID was passed, 0 is reserved
+        if gwid:
+            # check if we have the desired gw in our list
+            for info in self.gateway_list:
+                if info.gwid == gwid:
+                    self.curr_gateway = info
+                    break
+            else:
+                self.msg_inflight = None
+                return False
         else:
-            self.msg_inflight = None
-            return False
+            # if no gateway was provided, select any available gateway
+            for i in range(len(self.gateway_list)):
+                if self.gateway_list[i].available:
+                    self.curr_gateway = self.gateway_list[i]
+                    break
+            else:
+                # if they're all marked unavailable, lets try them again
+                for i in range(len(self.gateway_list)):
+                    self.gateway_list[i].available = True
+
+                self.curr_gateway = self.gateway_list[0]
 
         # send the msg to the gw, start timers
         self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
 
         self.connected = False
         self.state = MQTTSNState.CONNECTING
+
+        # start unicast timer
+        self.last_out = time.time()
         self.unicast_timer = time.time()
         self.unicast_counter = 0
         return True
 
-    def register_topic(self, topic):
+    def register_topics(self, topics):
+        # if we're not connected or theres a pending register
+        if not self.is_connected() or self.msg_inflight:
+            return False
+
+    def register(self, topic):
         # if we're not connected or theres a pending register
         if not self.is_connected() or self.msg_inflight:
             return False
@@ -214,6 +241,8 @@ class MQTTSNClient:
 
         self.msg_inflight = msg.pack()
         self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
+
+        self.last_out = time.time()
         self.unicast_timer = time.time()
         self.unicast_counter = 0
 
@@ -245,6 +274,8 @@ class MQTTSNClient:
         raw = msg.pack()
         self.transport.write_packet(raw, self.curr_gateway.gwaddr)
 
+        # need to note last_out for QoS 1 publish
+
         # always a 16-bit value
         self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
 
@@ -263,6 +294,8 @@ class MQTTSNClient:
 
         self.msg_inflight = msg.pack()
         self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
+
+        self.last_out = time.time()
         self.unicast_timer = time.time()
         self.unicast_counter = 0
 
@@ -290,6 +323,8 @@ class MQTTSNClient:
 
         self.msg_inflight = msg.pack()
         self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
+
+        self.last_out = time.time()
         self.unicast_timer = time.time()
         self.unicast_counter = 0
 
@@ -303,6 +338,8 @@ class MQTTSNClient:
         msg = MQTTSNMessagePingreq()
         raw = msg.pack()
         self.transport.write_packet(raw, self.curr_gateway.gwaddr)
+
+        self.last_out = time.time()
         self.pingreq_timer = time.time()
 
     def transaction_pending(self):
@@ -370,7 +407,7 @@ class MQTTSNClient:
         else:
             # check if a gw or client sent the GWINFO
             if msg.gwadd:
-                self.gateway_list.append(MQTTSNGWInfo(msg.gwid, MQTTSNAddress(msg.gwadd)))
+                self.gateway_list.append(MQTTSNGWInfo(msg.gwid, msg.gwadd))
             else:
                 self.gateway_list.append(MQTTSNGWInfo(msg.gwid, from_addr))
 
@@ -381,7 +418,7 @@ class MQTTSNClient:
         return True
 
     def _handle_connack(self, pkt, from_addr):
-        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
             return False
 
         if self.msg_inflight is None:
@@ -408,18 +445,14 @@ class MQTTSNClient:
         self.state = MQTTSNState.ACTIVE
         self.connected = True
         self.msg_inflight = None
-
-        # if we haven't sent a ping already,
-        # then no need to send one anytime soon
-        if not self.pingresp_pending:
-            self.last_transaction = time.time()
+        self.last_in = time.time()
 
         return True
 
     def _handle_regack(self, pkt, from_addr):
         # if this is to be used as proof of connectivity,
         # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
             return False
 
         if self.msg_inflight is None:
@@ -441,7 +474,6 @@ class MQTTSNClient:
         if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
             return False
 
-        self.last_transaction = time.time()
         for i in range(MQTTSN_MAX_NUM_TOPICS):
             if self.pub_topics[i] is None:
                 self.pub_topics[i] = MQTTSNTopic(sent.topic_name, msg.topic_id)
@@ -452,11 +484,7 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics += 1
-
-        # if we haven't sent a ping already,
-        # then no need to send one anytime soon
-        if not self.pingresp_pending:
-            self.last_transaction = time.time()
+        self.last_in = time.time()
 
         return True
 
@@ -487,7 +515,7 @@ class MQTTSNClient:
     def _handle_suback(self, pkt, from_addr):
         # if this is to be used as proof of connectivity,
         # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
             return False
 
         if self.msg_inflight is None:
@@ -509,8 +537,6 @@ class MQTTSNClient:
         if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
             return False
 
-        self.last_transaction = time.time()
-
         # add to the list
         for i in range(MQTTSN_MAX_NUM_TOPICS):
             if self.sub_topics[i] is None:
@@ -522,18 +548,14 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics += 1
-
-        # if we haven't sent a ping already,
-        # then no need to send one anytime soon
-        if not self.pingresp_pending:
-            self.last_transaction = time.time()
+        self.last_in = time.time()
 
         return True
 
     def _handle_unsuback(self, pkt, from_addr):
         # if this is to be used as proof of connectivity,
         # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr.bytes != self.curr_gateway.gwaddr.bytes:
+        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
             return False
 
         if self.msg_inflight is None:
@@ -571,11 +593,7 @@ class MQTTSNClient:
 
         self.msg_inflight = None
         self.num_topics -= 1
-
-        # if we haven't sent a ping already,
-        # then no need to send one anytime soon
-        if not self.pingresp_pending:
-            self.last_transaction = time.time()
+        self.last_in = time.time()
 
         return True
 
@@ -584,7 +602,7 @@ class MQTTSNClient:
         if not msg.unpack(pkt):
             return False
 
-        self.last_transaction = time.time()
+        self.last_in = time.time()
         self.pingresp_pending = False
         return True
 
@@ -607,18 +625,6 @@ class MQTTSNClient:
             self.state = MQTTSNState.ACTIVE
             return
 
-        # Select available gateway
-        for i in range(len(self.gateway_list)):
-            if self.gateway_list[i].available:
-                self.curr_gateway = self.gateway_list[i]
-                break
-        else:
-            # if they're all marked unavailable, lets try them again
-            for i in range(len(self.gateway_list)):
-                self.gateway_list[i].available = True
-
-            self.curr_gateway = self.gateway_list[0]
-
         # try to connect
         self.connect(self.curr_gateway.gwid)
 
@@ -631,16 +637,19 @@ class MQTTSNClient:
         # use this for now, so we can change fraction later
         duration = self.keep_alive_duration
 
-        if time.time() >= self.last_transaction + duration:
+        curr_time = time.time()
+        if curr_time >= self.last_out + duration or curr_time >= self.last_in + duration:
             if not self.pingresp_pending:
                 self.ping()
+                self.last_out = time.time()
                 self.pingresp_pending = True
-            elif time.time() - self.pingreq_timer >= MQTTSN_T_RETRY:
+            elif curr_time - self.pingreq_timer >= MQTTSN_T_RETRY:
                 # just keep trying till we hit the keepalive limit
-                if time.time() >= self.last_transaction + self.keep_alive_duration * 1.1:
+                if curr_time >= self.last_in + self.keep_alive_duration * 1.5:
                     self.state = MQTTSNState.LOST
                     self.connected = False
                     self.pingresp_pending = False
                 else:
                     self.ping()
                     self.pingreq_timer = time.time()
+                    self.last_out = time.time()
