@@ -2,14 +2,14 @@ import struct
 from mqttsn_defines import *
 
 # Message types
-MSG_TYPES = range(30)
+MQTTSN_MSG_TYPES = range(30)
 
 ADVERTISE, SEARCHGW, GWINFO, reserved, CONNECT, CONNACK, \
     WILLTOPICREQ, WILLTOPIC, WILLMSGREQ, WILLMSG, \
     REGISTER, REGACK, PUBLISH, PUBACK, PUBCOMP, PUBREC, \
     PUBREL, reserved1, SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, \
     PINGREQ, PINGRESP, DISCONNECT, reserved2, \
-    WILLTOPICUPD, WILLTOPICRESP, WILLMSGUPD, WILLMSGRESP = MSG_TYPES
+    WILLTOPICUPD, WILLTOPICRESP, WILLMSGUPD, WILLMSGRESP = MQTTSN_MSG_TYPES
 
 MSG_TYPE_NAMES = ["ADVERTISE", "SEARCHGW", "GWINFO", "reserved",
                   "CONNECT", "CONNACK", "WILLTOPICREQ", "WILLTOPIC",
@@ -23,11 +23,24 @@ MSG_TYPE_NAMES = ["ADVERTISE", "SEARCHGW", "GWINFO", "reserved",
 TOPIC_TYPE_NAMES = ["NORMAL", "PREDEFINED", "SHORT_NAME"]
 TOPIC_NORMAL, TOPIC_PREDEFINED, TOPIC_SHORTNAME = range(3)
 
+# return codes
+MQTTSN_RC_ACCEPTED = 0x00
+MQTTSN_RC_CONGESTION = 0x01
+MQTTSN_RC_INVALIDTID = 0x02
+MQTTSN_RC_NOTSUPPORTED = 0x03
 
-class MQTTSNTopic:
+
+class MQTTSNPubTopic:
     def __init__(self, name, tid=0):
         self.name = name
         self.tid = tid
+
+
+class MQTTSNSubTopic:
+    def __init__(self, name, tid=0, flags=None):
+        self.name = name
+        self.tid = tid
+        self.flags = flags if flags else MQTTSNFlags()
 
 
 class MQTTSNHeader:
@@ -208,13 +221,13 @@ class MQTTSNMessageConnect(MQTTSNMessage):
             flags_bytes, self.protocol_id, self.duration, self.client_id = struct.unpack(fmt, buffer)
             self.flags = MQTTSNFlags()
             self.flags.unpack(flags_bytes)
-            return True
+            return True if self.protocol_id == 0x01 else False
         except struct.error:
             return False
 
 
 class MQTTSNMessageConnack(MQTTSNMessage):
-    def __init__(self, return_code=0x00):
+    def __init__(self, return_code=MQTTSN_RC_ACCEPTED):
         super().__init__()
         self.return_code = return_code
 
@@ -260,7 +273,7 @@ class MQTTSNMessageRegister(MQTTSNMessage):
 
 
 class MQTTSNMessageRegack(MQTTSNMessage):
-    def __init__(self, return_code=0x00):
+    def __init__(self, return_code=MQTTSN_RC_ACCEPTED):
         super().__init__()
         self.topic_id = 0
         self.msg_id = 0

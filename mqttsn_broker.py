@@ -7,6 +7,60 @@ import time
 import random
 
 
+class MQTTSNInstance:
+    sub_topics: List[MQTTSNSubTopic] = [MQTTSNSubTopic] * MQTTSN_MAX_NUM_TOPICS
+    pub_topics: List[MQTTSNPubTopic] = [MQTTSNPubTopic] * MQTTSN_MAX_NUM_TOPICS
+
+    cid: bytes = b''
+    flags: MQTTSNFlags
+
+    address: bytes = b''
+    msg_inflight: bytes = None
+    keepalive_duration: int = MQTTSN_DEFAULT_KEEPALIVE
+
+    last_in: float
+
+    def __init__(self):
+        pass
+
+    def add_sub_topic(self, name: bytes, flags: MQTTSNFlags):
+        for i in range(MQTTSN_MAX_NUM_TOPICS):
+            if self.sub_topics[i].tid == 0:
+                self.sub_topics[i].name = name
+                self.sub_topics[i].tid = i + 1
+                self.sub_topics[i].flags = flags
+                return self.sub_topics[i].tid
+        else:
+            return 0
+
+    def add_pub_topic(self, name: bytes):
+        for i in range(MQTTSN_MAX_NUM_TOPICS):
+            if self.pub_topics[i].tid == 0:
+                self.pub_topics[i].name = name
+                self.pub_topics[i].tid = i + 1
+                return self.pub_topics[i].tid
+        else:
+            return 0
+
+    def delete_sub_topic(self, name: bytes):
+        for i in range(MQTTSN_MAX_NUM_TOPICS):
+            if self.sub_topics[i].name == name:
+                self.sub_topics[i].name = ''
+                self.sub_topics[i].tid = 0
+                self.sub_topics[i].flags = None
+                return True
+        else:
+            return False
+
+    def delete_pub_topic(self, name: bytes):
+        for i in range(MQTTSN_MAX_NUM_TOPICS):
+            if self.pub_topics[i].name == name:
+                self.pub_topics[i].name = b''
+                self.pub_topics[i].tid = 0
+                return True
+        else:
+            return False
+
 @unique
 class MQTTSNState(IntEnum):
     ACTIVE = 0
@@ -26,16 +80,13 @@ class MQTTSNGWInfo:
         self.available = True
 
 
-class MQTTSNClient:
+class MQTTSNBroker:
     # list of topics
     pub_topics: List[MQTTSNPubTopic]
     sub_topics: List[MQTTSNSubTopic]
 
-    # list of discovered gateways
-    gateways: List[MQTTSNGWInfo] = []
-
-    # publish callback
-    publish_cb: Callable[[bytes, bytes, MQTTSNFlags], None] = None
+    # list of clients
+    clients: List[MQTTSNInstance] = [MQTTSNInstance()] * MQTTSN_MAX_NUM_CLIENTS
 
     # handle incoming messages
     msg_handlers: List[Callable[[bytes, bytes], None]] = [None] * len(MQTTSN_MSG_TYPES)
@@ -43,9 +94,9 @@ class MQTTSNClient:
     # handle client states
     state_handlers: List[Callable[[], None]] = [None] * len(MQTTSNState.__members__)
 
-    def __init__(self, client_id, transport: MQTTSNTransport):
+    def __init__(self, gw_id: int, transport: MQTTSNTransport):
+        self.gw_id = gw_id
         self.transport = transport
-        self.client_id = client_id[:MQTTSN_MAX_CLIENTID_LEN]
         self.state = MQTTSNState.DISCONNECTED
 
         # store the current gw
@@ -86,25 +137,18 @@ class MQTTSNClient:
         self._assign_handlers()
 
     def _assign_handlers(self):
-        self.msg_handlers[ADVERTISE] = self._handle_advertise
         self.msg_handlers[SEARCHGW] = self._handle_searchgw
-        self.msg_handlers[GWINFO] = self._handle_gwinfo
-        self.msg_handlers[CONNACK] = self._handle_connack
-        self.msg_handlers[REGACK] = self._handle_regack
-        self.msg_handlers[SUBACK] = self._handle_suback
-        self.msg_handlers[UNSUBACK] = self._handle_unsuback
+        self.msg_handlers[CONNECT] = self._handle_connect
+        self.msg_handlers[REGISTER] = self._handle_register
+        self.msg_handlers[SUBSCRIBE] = self._handle_subscribe
+        self.msg_handlers[UNSUBSCRIBE] = self._handle_unsubscribe
         self.msg_handlers[PUBLISH] = self._handle_publish
-        self.msg_handlers[PINGRESP] = self._handle_pingresp
+        self.msg_handlers[PINGREQ] = self._handle_pingreq
 
         self.state_handlers[MQTTSNState.ACTIVE] = self._active_handler
-        self.state_handlers[MQTTSNState.SEARCHING] = self._searching_handler
         self.state_handlers[MQTTSNState.CONNECTING] = self._connecting_handler
         self.state_handlers[MQTTSNState.LOST] = self._lost_handler
         self.state_handlers[MQTTSNState.DISCONNECTED] = self._disconnected_handler
-
-    def add_gateways(self, gateways: List[MQTTSNGWInfo]):
-        self.gateways = gateways
-        self.num_gateways = len(gateways)
 
     def loop(self):
         # make sure to handle msgs first
@@ -167,61 +211,6 @@ class MQTTSNClient:
             # resend msg
             self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
             return False
-
-    def searchgw(self):
-        # queue the search to begin after a random amount of time
-        self.searchgw_started = time.time()
-        self.searchgw_interval = random.uniform(0, MQTTSN_T_SEARCHGW)
-        self.searchgw_pending = True
-        self.state = MQTTSNState.SEARCHING
-
-    def connect(self, gwid=0, flags=0, duration=MQTTSN_DEFAULT_KEEPALIVE):
-        if not self.gateways or self.msg_inflight:
-            return False
-        
-        msg = MQTTSNMessageConnect()
-        msg.flags = flags
-        msg.client_id = self.client_id
-        msg.duration = duration
-        self.keep_alive_duration = duration
-        
-        # pack and store the msg for later retries
-        self.msg_inflight = msg.pack()
-        
-        # check if a valid GWID was passed, 0 is reserved
-        if gwid:
-            # check if we have the desired gw in our list
-            for info in self.gateways:
-                if info.gwid == gwid:
-                    self.curr_gateway = info
-                    break
-            else:
-                self.msg_inflight = None
-                return False
-        else:
-            # if no gateway was provided, select any available gateway
-            for i in range(self.num_gateways):
-                if self.gateways[i].available:
-                    self.curr_gateway = self.gateways[i]
-                    break
-            else:
-                # if they're all marked unavailable, lets try them all again
-                for i in range(self.num_gateways):
-                    self.gateways[i].available = True
-
-                self.curr_gateway = self.gateways[0]
-
-        # send the msg to the gw, start timers
-        self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)
-
-        self.connected = False
-        self.state = MQTTSNState.CONNECTING
-
-        # start unicast timer
-        self.last_out = time.time()
-        self.unicast_timer = time.time()
-        self.unicast_counter = 0
-        return True
 
     def register_topics(self, topics: List[MQTTSNPubTopic]):
         self.pub_topics = topics
@@ -392,125 +381,77 @@ class MQTTSNClient:
     def on_publish(self, callback):
         self.publish_cb = callback
 
-    def _handle_advertise(self, pkt, from_addr):
-        msg = MQTTSNMessageAdvertise()
-        if not msg.unpack(pkt):
-            return
-
-        for i in range(self.num_gateways):
-            if self.gateways[i].gwid == 0:
-                self.gateways[i].gwid = msg.gwid
-                self.gateways[i].gwaddr = from_addr
-                break
-
-        return
-
     def _handle_searchgw(self, pkt, from_addr):
         msg = MQTTSNMessageSearchGW()
         if not msg.unpack(pkt):
             return
 
-        # in state handler, we fire the actual message
-        # and check timers to know if we should resend
-
-        # Here, we just cancel our pending request and reset timer
-        # if some other client already sent it
-        if self.searchgw_pending:
-            self.searchgw_pending = False
-            self.searchgw_started = time.time()
-
-        # TODO: Send GWINFO from clients
-
+        reply = MQTTSNMessageGWInfo()
+        reply.id = self.gw_id
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
         return
 
-    def _handle_gwinfo(self, pkt, from_addr):
-        msg = MQTTSNMessageGWInfo()
-        if not msg.unpack(pkt):
-            return
-
-        # check if its in our gateway list, add it if its not
-        for info in self.gateways:
-            if info.gwid == msg.gwid:
-                break
-        else:
-            for i in range(self.num_gateways):
-                if self.gateways[i].gwid == 0:
-                    self.gateways[i].gwid = msg.gwid
-
-                    # check if a gw or client sent the GWINFO
-                    self.gateways[i].gwaddr = msg.gwadd if msg.gwadd else from_addr
-                    break
-
-        # we've gotten a GWINFO but we'll remain in this state
-        # till app tries to connect
-        self.searchgw_pending = False
-        # self.state = MQTTSNState.DISCONNECTED
-
-    def _handle_connack(self, pkt, from_addr):
-        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
-            return
-
+    def _handle_connect(self, pkt, from_addr):
         if self.msg_inflight is None:
             return
 
-        # unpack the original connect
-        header = MQTTSNHeader()
-        hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageConnect:
+        msg = MQTTSNMessageConnect()
+        if not msg.unpack(pkt) or not msg.client_id:
             return
 
-        sent = MQTTSNMessageConnect()
-        sent.unpack(self.msg_inflight[hlen:])
+        reply = MQTTSNMessageConnack()
+        reply.return_code = MQTTSN_RC_ACCEPTED
 
-        # now unpack the connack
-        msg = MQTTSNMessageConnack()
-        if not msg.unpack(pkt):
-            return
-        if msg.return_code != MQTTSN_RC_ACCEPTED:
-            self.msg_inflight = None
-            self.state = MQTTSNState.DISCONNECTED
-            return
-
-        self.state = MQTTSNState.ACTIVE
-        self.connected = True
-        self.msg_inflight = None
-        self.last_in = time.time()
-
-    def _handle_regack(self, pkt, from_addr):
-        # if this is to be used as proof of connectivity,
-        # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
-            return
-
-        if self.msg_inflight is None:
-            return
-
-        # unpack the original message
-        header = MQTTSNHeader()
-        hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageRegister:
-            return
-
-        sent = MQTTSNMessageRegister()
-        sent.unpack(self.msg_inflight[hlen:])
-
-        # now unpack the response
-        msg = MQTTSNMessageRegack()
-        if not msg.unpack(pkt):
-            return
-        if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
-            return
-
-        for i in range(self.pub_topics_cnt):
-            if self.pub_topics[i].name == sent.topic_name:
-                self.pub_topics[i].tid = msg.topic_id
+        for clnt in self.clients:
+            if not clnt.cid:
+                clnt.cid = msg.client_id
+                clnt.address = from_addr
+                clnt.keepalive_duration = msg.duration
+                clnt.flags = msg.flags
+                clnt.msg_inflight = None
+                clnt.last_in = time.time()
                 break
         else:
-            # topic not found
+            # no space left for new clients
+            reply.return_code = MQTTSN_RC_CONGESTION
+
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
+
+    def _get_instance(self, addr):
+        for clnt in self.clients:
+            if clnt.address == addr:
+                return clnt
+        else:
+            return None
+
+    def _handle_register(self, pkt, from_addr):
+        clnt = self._get_instance(from_addr)
+        if not clnt:
             return
 
-        self.msg_inflight = None
-        self.last_in = time.time()
+        clnt.last_in = time.time()
+
+        # unpack the msg
+        msg = MQTTSNMessageRegister()
+        if not msg.unpack(pkt) or msg.topic_id != 0x0000:
+            return
+
+        # construct regack response
+        reply = MQTTSNMessageRegack()
+        reply.msg_id = msg.msg_id
+
+        # try to add the topic to the instance
+        tid = clnt.add_pub_topic(msg.topic_name)
+        if tid == 0:
+            reply.return_code = MQTTSN_RC_CONGESTION
+        else:
+            reply.topic_id = tid
+
+        # now send our reply
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
 
     def _handle_publish(self, pkt, from_addr):
         # wont check the gw address
@@ -534,98 +475,77 @@ class MQTTSNClient:
         # call user handler
         self.publish_cb(topic, msg.data, msg.flags)
 
-    # TODO: Consider removing suback and unsuback, no gain in parsing them
-    def _handle_suback(self, pkt, from_addr):
-        # if this is to be used as proof of connectivity,
-        # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
-            return False
-
-        if self.msg_inflight is None:
-            return False
-
-        # unpack the original message
-        header = MQTTSNHeader()
-        hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageSubscribe:
+    def _handle_subscribe(self, pkt, from_addr):
+        clnt = self._get_instance(from_addr)
+        if not clnt:
             return
 
-        sent = MQTTSNMessageSubscribe()
-        sent.unpack(self.msg_inflight[hlen:])
+        clnt.last_in = time.time()
 
-        # now unpack the response
-        msg = MQTTSNMessageSuback()
+        # unpack the msg
+        msg = MQTTSNMessageSubscribe()
         if not msg.unpack(pkt):
             return
-        if msg.msg_id != sent.msg_id or msg.return_code != MQTTSN_RC_ACCEPTED:
-            return
 
-        # update the topic id
-        for i in range(self.sub_topics_cnt):
-            if self.sub_topics[i].name == sent.topic_id_name:
-                self.sub_topics[i].tid = msg.topic_id
-                break
+        # construct suback response
+        reply = MQTTSNMessageSuback()
+        reply.msg_id = msg.msg_id
+
+        # try to add the topic to the instance
+        tid = clnt.add_sub_topic(msg.topic_id_name, msg.flags)
+        if tid == 0:
+            reply.return_code = MQTTSN_RC_CONGESTION
         else:
-            # topic not found
+            reply.topic_id = tid
+
+        # now send our reply
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
+
+        # here we issue our subscribe to MQTT clnt
+
+    def _handle_unsubscribe(self, pkt, from_addr):
+        clnt = self._get_instance(from_addr)
+        if not clnt:
             return
 
-        self.msg_inflight = None
-        self.last_in = time.time()
+        clnt.last_in = time.time()
 
-    def _handle_unsuback(self, pkt, from_addr):
-        # if this is to be used as proof of connectivity,
-        # then we must verify that the gateway is the right one
-        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
-            return
-
-        if self.msg_inflight is None:
-            return
-
-        # unpack the original message
-        header = MQTTSNHeader()
-        hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageUnsubscribe:
-            return
-
-        sent = MQTTSNMessageUnsubscribe()
-        sent.unpack(self.msg_inflight[hlen:])
-
-        # now unpack the response
-        msg = MQTTSNMessageUnsuback()
-        if not msg.unpack(pkt):
-            return
-        if msg.msg_id != sent.msg_id:
-            return
-
-        # remove from list
-        for i in range(self.sub_topics_cnt):
-            if self.sub_topics[i].name == sent.topic_id_name:
-                self.sub_topics[i].name = ''
-                self.sub_topics[i].tid = 0
-                break
-        else:
-            return
-
-        self.msg_inflight = None
-        self.last_in = time.time()
-
-    def _handle_pingresp(self, pkt, from_addr):
-        msg = MQTTSNMessagePingresp()
+        # unpack the msg
+        msg = MQTTSNMessageUnsubscribe()
         if not msg.unpack(pkt):
             return
 
-        self.last_in = time.time()
-        self.pingresp_pending = False
-        return
+        # construct unsuback response
+        reply = MQTTSNMessageUnsuback()
+        reply.msg_id = msg.msg_id
 
-    def _searching_handler(self):
-        # if there's a pending search and the wait interval is over
-        if self.searchgw_pending and time.time() > self.searchgw_started + self.searchgw_interval:
-            # broadcast it and start waiting again
-            msg = MQTTSNMessageSearchGW().pack()
-            self.transport.broadcast(msg)
-            self.searchgw_started = time.time()
-            self.searchgw_interval = random.uniform(0, MQTTSN_T_SEARCHGW)
+        # try to remove the topic from the instance
+        rc = clnt.delete_sub_topic(msg.topic_id_name)
+        if not rc:
+            return
+
+        # now send our reply
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
+
+        # here we issue our unsubscribe to MQTT clnt
+
+    def _handle_pingreq(self, pkt, from_addr):
+        clnt = self._get_instance(from_addr)
+        if not clnt:
+            return
+
+        clnt.last_in = time.time()
+
+        msg = MQTTSNMessagePingreq()
+        if not msg.unpack(pkt):
+            return
+
+        # now send our reply
+        reply = MQTTSNMessagePingresp()
+        raw = reply.pack()
+        self.transport.write_packet(raw, from_addr)
 
     def _connecting_handler(self):
         if self.connected:

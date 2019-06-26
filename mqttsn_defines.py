@@ -16,13 +16,12 @@ MQTTSN_DEFAULT_KEEPALIVE = 30
 MQTTSN_T_RETRY = 5
 MQTTSN_N_RETRY = 3
 
-# return codes
-MQTTSN_RC_ACCEPTED = 0x00
-MQTTSN_RC_CONGESTION = 0x01
-MQTTSN_RC_INVALIDTID = 0x02
-MQTTSN_RC_NOTSUPPORTED = 0x03
-
 # in seconds
 MQTTSN_T_SEARCHGW = 5
 
+#############################
+# For gateways
+#############################
+
 MQTTSN_MAX_NUM_TOPICS = 10
+MQTTSN_MAX_NUM_CLIENTS = 10

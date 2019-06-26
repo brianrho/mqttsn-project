@@ -1,6 +1,6 @@
 from mqttsn_transport_udp import MQTTSNTransportUDP
 from mqttsn_client import MQTTSNClient, MQTTSNState, MQTTSNGWInfo
-from structures import MQTTSNTopic
+from structures import MQTTSNPubTopic, MQTTSNSubTopic
 import time
 
 # list of gateways
@@ -22,8 +22,8 @@ while not clnt.is_connected() or clnt.state == MQTTSNState.CONNECT_IN_PROGRESS:
     pass
 
 # pub and sub topics
-sub_topics = [MQTTSNTopic(b'/button')]
-pub_topics = [MQTTSNTopic(b'/led')]
+sub_topics = [MQTTSNSubTopic(b'button')]
+pub_topics = [MQTTSNPubTopic(b'led')]
 
 
 def init_tasks():
