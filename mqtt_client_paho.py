@@ -30,6 +30,8 @@ class MQTTClientPaho(MQTTClient):
     def connect(self):
         self.client.connect(self.server, self.port)
 
+    # register handlers for connection updates
+    # and incoming PUBLISH msgs
     def register_handlers(self, conn_disconn_cb, msg_cb):
         self.broker_conn_cb = conn_disconn_cb
         self.broker_msg_cb = msg_cb
@@ -43,12 +45,14 @@ class MQTTClientPaho(MQTTClient):
     def unsubscribe(self, topic):
         self.client.unsubscribe(topic)
 
+    # called whenever we get a PUBLISH message
     def message_cb(self, userdata, message: mqtt.MQTTMessage):
         flags = MQTTSNFlags()
         flags.retain = message.retain
         flags.qos = message.qos
         self.broker_msg_cb(message.topic, message.payload, flags)
 
+    # called whenever we have a conn/disconn event
     def connect_cb(self, client, userdata, flags, rc):
         if rc == 0:
             self.broker_conn_cb(True)
