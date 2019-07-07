@@ -13,13 +13,13 @@ transport = MQTTSNTransportUDP(port, b'\x02')
 print("Starting client.")
 
 # create client and connect
-clnt = MQTTSNClient('TestClient', transport)
+clnt = MQTTSNClient(b'TestClient', transport)
 clnt.add_gateways(gateways)
 clnt.connect(gwid=1)
 
 # wait till we're connected
-while not clnt.is_connected() or clnt.state == MQTTSNState.CONNECT_IN_PROGRESS:
-    pass
+while not clnt.is_connected() or clnt.state == MQTTSNState.CONNECTING:
+    time.sleep(0.05)
 
 # pub and sub topics
 sub_topics = [MQTTSNSubTopic(b'button')]
@@ -36,21 +36,26 @@ def init_tasks():
     return True
 
 
-led_state = 1
+led_state = bytearray([0])
 last_publish = time.time()
 
+print('Entering client loop.')
 while True:
-    clnt.loop()
+    try:
+        time.sleep(0.05)
+        clnt.loop()
 
-    if clnt.state in (MQTTSNState.DISCONNECTED, MQTTSNState.LOST):
-        print("Gateway connection lost.")
+        if clnt.state in (MQTTSNState.DISCONNECTED, MQTTSNState.LOST):
+            print("Gateway connection lost.")
 
-    # check if all the pubs and subs are done
-    if not init_tasks():
-        continue
+        # check if all the pubs and subs are done
+        if not init_tasks():
+            continue
 
-    # toggle led state and publish every 5 secs
-    if time.time() - last_publish > 5:
-        led_state ^= 1
-        clnt.publish('/led', led_state.to_bytes(1, 'big'))
-        last_publish = time.time()
+        # toggle led state and publish every 5 secs
+        if time.time() - last_publish > 5:
+            led_state[0] ^= 1
+            clnt.publish(b'led', led_state)
+            last_publish = time.time()
+    except KeyboardInterrupt:
+        break

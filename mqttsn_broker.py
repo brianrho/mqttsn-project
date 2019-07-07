@@ -41,7 +41,7 @@ class MQTTSNInstance:
     unicast_counter: float = 0
 
     keepalive_duration: int = MQTTSN_DEFAULT_KEEPALIVE
-    last_in: float
+    last_in: float = 0
     status: MQTTSNInstanceStatus = MQTTSNInstanceStatus.DISCONNECTED
 
     def __init__(self):
@@ -190,7 +190,8 @@ class MQTTSNBroker:
 
         # MQTT client handles, also register the relevant handlers
         self.mqttc = mqttc
-        self.mqttc.register_handlers(self._handle_mqtt_conn, self._handle_mqtt_publish)
+        if self.mqttc:
+            self.mqttc.register_handlers(self._handle_mqtt_conn, self._handle_mqtt_publish)
 
         # flag for keeping track of MQTT client connection
         self.connected = False
@@ -219,7 +220,7 @@ class MQTTSNBroker:
 
         # check keepalive and inflight messages
         for clnt in self.clients:
-            if clnt.check_status() == MQTTSNInstanceStatus.LOST:
+            if clnt and clnt.check_status() == MQTTSNInstanceStatus.LOST:
                 clnt.deregister()
 
         # now distribute any pending publish msgs
@@ -267,6 +268,8 @@ class MQTTSNBroker:
             idx = header.msg_type
             if idx >= len(self.msg_handlers) or self.msg_handlers[idx] is None:
                 continue
+
+            print("Got something: ", pkt)
 
             # call the msg handler
             self.msg_handlers[idx](pkt[rlen:], from_addr)
@@ -332,7 +335,7 @@ class MQTTSNBroker:
             if self.topics[idx].tid == tid:
                 return self.topics[idx].name
 
-        return ''
+        return b''
 
     def _get_instance(self, addr):
         for clnt in self.clients:
@@ -383,7 +386,7 @@ class MQTTSNBroker:
         topic_name = self._get_topic_name(msg.topic_id)
 
         # if we're connected to the MQTT broker, just pass on the PUBLISH
-        if self.connected:
+        if self.mqttc and self.connected:
             self.mqttc.publish(topic_name, msg.data, msg.flags.qos, msg.flags.retain)
         else:
             # else we're on our own, add the msg to our queue
@@ -419,7 +422,8 @@ class MQTTSNBroker:
         self.transport.write_packet(raw, from_addr)
 
         # here we issue our subscribe to MQTT clnt
-        self.mqttc.subscribe(msg.topic_id_name, msg.flags.qos)
+        if self.mqttc:
+            self.mqttc.subscribe(msg.topic_id_name, msg.flags.qos)
 
     def _handle_unsubscribe(self, pkt, from_addr):
         clnt = self._get_instance(from_addr)
@@ -446,7 +450,8 @@ class MQTTSNBroker:
         self.transport.write_packet(raw, from_addr)
 
         # here we issue our unsubscribe to MQTT clnt
-        self.mqttc.unsubscribe(msg.topic_id_name)
+        if self.mqttc:
+            self.mqttc.unsubscribe(msg.topic_id_name)
 
     def _handle_pingreq(self, pkt, from_addr):
         clnt = self._get_instance(from_addr)

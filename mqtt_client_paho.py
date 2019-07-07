@@ -37,9 +37,11 @@ class MQTTClientPaho(MQTTClient):
         self.broker_msg_cb = msg_cb
 
     def publish(self, topic, data, qos=0, retain=False):
+        topic = topic.decode()
         self.client.publish(topic, data, qos, retain)
 
     def subscribe(self, topic, qos=0):
+        topic = topic.decode()
         self.client.subscribe(topic, qos)
 
     def unsubscribe(self, topic):

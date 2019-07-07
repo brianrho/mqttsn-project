@@ -28,8 +28,8 @@ class MQTTSNGWInfo:
 
 class MQTTSNClient:
     # list of topics
-    pub_topics: List[MQTTSNPubTopic]
-    sub_topics: List[MQTTSNSubTopic]
+    pub_topics: List[MQTTSNPubTopic] = []
+    sub_topics: List[MQTTSNSubTopic] = []
 
     # list of discovered gateways
     gateways: List[MQTTSNGWInfo] = []
@@ -175,12 +175,12 @@ class MQTTSNClient:
         self.searchgw_pending = True
         self.state = MQTTSNState.SEARCHING
 
-    def connect(self, gwid=0, flags=0, duration=MQTTSN_DEFAULT_KEEPALIVE):
+    def connect(self, gwid=0, flags=None, duration=MQTTSN_DEFAULT_KEEPALIVE):
         if not self.gateways or self.msg_inflight:
             return False
         
         msg = MQTTSNMessageConnect()
-        msg.flags = flags
+        msg.flags = flags if flags else MQTTSNFlags()
         msg.client_id = self.client_id
         msg.duration = duration
         self.keep_alive_duration = duration
@@ -241,7 +241,7 @@ class MQTTSNClient:
 
     def _register(self, topic: MQTTSNPubTopic):
         msg = MQTTSNMessageRegister()
-        msg.topic_name = topic
+        msg.topic_name = topic.name
         msg.topic_id = 0
         # 0 is reserved for message IDs
         self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
@@ -271,11 +271,16 @@ class MQTTSNClient:
         else:
             return False
 
+        flags = flags if flags else MQTTSNFlags()
+
         # msgid = 0 for qos 0
         if flags.qos in (1, 2):
             # 0 is reserved
             self.curr_msg_id = 1 if self.curr_msg_id == 0 else self.curr_msg_id
             msg.msg_id = self.curr_msg_id
+
+            # increment, always a 16-bit value
+            self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
 
         msg.flags = flags
         msg.data = data
@@ -284,8 +289,6 @@ class MQTTSNClient:
 
         # need to note last_out for QoS 1 publish
 
-        # always a 16-bit value
-        self.curr_msg_id = (self.curr_msg_id + 1) & 0xFFFF
         return True
 
     def subscribe_topics(self, topics: List[MQTTSNSubTopic]):
@@ -301,8 +304,8 @@ class MQTTSNClient:
             if t.tid == 0:
                 self._subscribe(t)
                 return False
-        else:
-            return True
+
+        return True
 
     def _subscribe(self, topic: MQTTSNSubTopic):
         msg = MQTTSNMessageSubscribe()
@@ -447,6 +450,7 @@ class MQTTSNClient:
         # self.state = MQTTSNState.DISCONNECTED
 
     def _handle_connack(self, pkt, from_addr):
+        # make sure its from the solicited gateway
         if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
             return
 
@@ -456,7 +460,7 @@ class MQTTSNClient:
         # unpack the original connect
         header = MQTTSNHeader()
         hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageConnect:
+        if not hlen or header.msg_type != CONNECT:
             return
 
         sent = MQTTSNMessageConnect()
@@ -471,10 +475,17 @@ class MQTTSNClient:
             self.state = MQTTSNState.DISCONNECTED
             return
 
+        # we are now active
         self.state = MQTTSNState.ACTIVE
         self.connected = True
         self.msg_inflight = None
         self.last_in = time.time()
+
+        # re-register and re-sub topics
+        for topic in self.sub_topics:
+            topic.tid = 0
+        for topic in self.pub_topics:
+            topic.tid = 0
 
     def _handle_regack(self, pkt, from_addr):
         # if this is to be used as proof of connectivity,
@@ -488,7 +499,7 @@ class MQTTSNClient:
         # unpack the original message
         header = MQTTSNHeader()
         hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageRegister:
+        if header.msg_type != REGISTER:
             return
 
         sent = MQTTSNMessageRegister()
@@ -547,7 +558,7 @@ class MQTTSNClient:
         # unpack the original message
         header = MQTTSNHeader()
         hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageSubscribe:
+        if header.msg_type != SUBSCRIBE:
             return
 
         sent = MQTTSNMessageSubscribe()
@@ -584,7 +595,7 @@ class MQTTSNClient:
         # unpack the original message
         header = MQTTSNHeader()
         hlen = header.unpack(self.msg_inflight)
-        if header.msg_type != MQTTSNMessageUnsubscribe:
+        if header.msg_type != UNSUBSCRIBE:
             return
 
         sent = MQTTSNMessageUnsubscribe()
@@ -614,6 +625,7 @@ class MQTTSNClient:
         if not msg.unpack(pkt):
             return
 
+        print('Got PINGRESP')
         self.last_in = time.time()
         self.pingresp_pending = False
         return
@@ -658,10 +670,13 @@ class MQTTSNClient:
             elif curr_time - self.pingreq_timer >= MQTTSN_T_RETRY:
                 # just keep trying till we hit the keepalive limit
                 if curr_time >= self.last_in + self.keep_alive_duration * 1.5:
+                    # we are now lost and the gateway is unavailable
                     self.state = MQTTSNState.LOST
+                    self.curr_gateway.available = False
                     self.connected = False
                     self.pingresp_pending = False
                 else:
+                    # if we still have time, keep pinging
                     self.ping()
                     self.pingreq_timer = time.time()
                     self.last_out = time.time()
