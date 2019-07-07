@@ -4,7 +4,7 @@ from mqttsn_transport_udp import MQTTSNTransportUDP
 import time
 
 # create MQTT client
-mqttc = MQTTClientPaho('iot.eclipse.org', 1883)
+mqttc = MQTTClientPaho('broker.hivemq.com', 1883)
 
 # setup transport info
 port = 20000

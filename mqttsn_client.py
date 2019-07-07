@@ -1,6 +1,6 @@
 from typing import List, Callable
 
-from structures import *
+from mqttsn_messages import *
 from mqttsn_transport import MQTTSNTransport
 from enum import IntEnum, unique
 import time
@@ -24,6 +24,19 @@ class MQTTSNGWInfo:
         self.gwid = gwid
         self.gwaddr = gwaddr
         self.available = True
+
+
+class MQTTSNPubTopic:
+    def __init__(self, name, tid=0):
+        self.name = name
+        self.tid = tid
+
+
+class MQTTSNSubTopic:
+    def __init__(self, name, tid=0, flags=None):
+        self.name = name
+        self.tid = tid
+        self.flags = flags if flags else MQTTSNFlags()
 
 
 class MQTTSNClient:
@@ -236,8 +249,8 @@ class MQTTSNClient:
             if t.tid == 0:
                 self._register(t)
                 return False
-        else:
-            return True
+
+        return True
 
     def _register(self, topic: MQTTSNPubTopic):
         msg = MQTTSNMessageRegister()
@@ -392,7 +405,7 @@ class MQTTSNClient:
         self.connected = False
         self.state = MQTTSNState.DISCONNECTED
 
-    def on_publish(self, callback):
+    def on_message(self, callback):
         self.publish_cb = callback
 
     def _handle_advertise(self, pkt, from_addr):
@@ -621,11 +634,16 @@ class MQTTSNClient:
         self.last_in = time.time()
 
     def _handle_pingresp(self, pkt, from_addr):
+        # if this is to be used as proof of connectivity,
+        # then we must verify that the gateway is the right one
+        if not self.curr_gateway or from_addr != self.curr_gateway.gwaddr:
+            return
+
         msg = MQTTSNMessagePingresp()
         if not msg.unpack(pkt):
             return
 
-        print('Got PINGRESP')
+        print('Got PINGRESP.')
         self.last_in = time.time()
         self.pingresp_pending = False
         return
@@ -649,7 +667,7 @@ class MQTTSNClient:
             self.state = MQTTSNState.ACTIVE
             return
 
-        # try to connect
+        # try to re-connect to the gateway
         self.connect(self.curr_gateway.gwid)
 
     def _disconnected_handler(self):

@@ -1,6 +1,6 @@
 from typing import List, Callable
 
-from structures import *
+from mqttsn_messages import *
 from mqttsn_transport import MQTTSNTransport
 from mqtt_client import MQTTClient
 from enum import IntEnum, unique
@@ -29,23 +29,23 @@ class MQTTSNInstanceStatus(IntEnum):
 class MQTTSNInstance:
     transport: MQTTSNTransport
 
-    sub_topics: List[MQTTSNInstanceSubTopic] = [MQTTSNInstanceSubTopic] * MQTTSN_MAX_INSTANCE_TOPICS
-    pub_topics: List[MQTTSNInstancePubTopic] = [MQTTSNInstancePubTopic] * MQTTSN_MAX_INSTANCE_TOPICS
-
-    cid: bytes = b''
-    flags: MQTTSNFlags
-
-    address: bytes = b''
-    msg_inflight: bytes = b''
-    unicast_timer: float = 0
-    unicast_counter: float = 0
-
-    keepalive_duration: int = MQTTSN_DEFAULT_KEEPALIVE
-    last_in: float = 0
-    status: MQTTSNInstanceStatus = MQTTSNInstanceStatus.DISCONNECTED
-
     def __init__(self):
-        pass
+        self.sub_topics: List[MQTTSNInstanceSubTopic] = \
+            [MQTTSNInstanceSubTopic() for _ in range(MQTTSN_MAX_INSTANCE_TOPICS)]
+        self.pub_topics: List[MQTTSNInstancePubTopic] = \
+            [MQTTSNInstancePubTopic() for _ in range(MQTTSN_MAX_INSTANCE_TOPICS)]
+
+        self.cid: bytes = b''
+        self.flags: MQTTSNFlags = MQTTSNFlags()
+
+        self.address: bytes = b''
+        self.msg_inflight: bytes = b''
+        self.unicast_timer: float = 0
+        self.unicast_counter: float = 0
+
+        self.keepalive_duration: int = MQTTSN_DEFAULT_KEEPALIVE
+        self.last_in: float = 0
+        self.status: MQTTSNInstanceStatus = MQTTSNInstanceStatus.DISCONNECTED
 
     # insert new client's details
     def register(self, cid, address, duration, flags):
@@ -75,7 +75,7 @@ class MQTTSNInstance:
     def __bool__(self):
         return bool(self.cid)
 
-    def add_sub_topic(self, tid, flags: MQTTSNFlags):
+    def add_sub_topic(self, tid: int, flags: MQTTSNFlags):
         # check if we're already subbed
         # and only update the flags if so
         for i in range(MQTTSN_MAX_INSTANCE_TOPICS):
@@ -93,7 +93,7 @@ class MQTTSNInstance:
         # no more space
         return False
 
-    def add_pub_topic(self, tid):
+    def add_pub_topic(self, tid: int):
         # check if we're already registered
         for i in range(MQTTSN_MAX_INSTANCE_TOPICS):
             if self.pub_topics[i].tid == tid:
@@ -166,20 +166,20 @@ class MQTTSNInstance:
         self.last_in = time.time()
 
 
-# for holding the broker's list of topic ID mappings
-class MQTTSNBrokerTopic:
-    def __init__(self, name='', tid=0, ttype=0):
+# a mapping of topic name to topic ID and type
+class MQTTSNTopicMapping:
+    def __init__(self, name=b'', tid=0, ttype=0):
         self.name = name
         self.tid = tid
         self.type = ttype
 
 
 class MQTTSNBroker:
-    # list of topics
-    topics: List[MQTTSNBrokerTopic] = [MQTTSNBrokerTopic()] * MQTTSN_MAX_BROKER_TOPICS
+    # for holding the broker's list of topic ID mappings
+    topics: List[MQTTSNTopicMapping] = [MQTTSNTopicMapping() for _ in range(MQTTSN_MAX_BROKER_TOPICS)]
 
     # list of clients
-    clients: List[MQTTSNInstance] = [MQTTSNInstance()] * MQTTSN_MAX_NUM_CLIENTS
+    clients: List[MQTTSNInstance] = [MQTTSNInstance() for _ in range(MQTTSN_MAX_NUM_CLIENTS)]
 
     # handle incoming messages
     msg_handlers: List[Callable[[bytes, bytes], None]] = [None] * len(MQTTSN_MSG_TYPES)
@@ -238,7 +238,7 @@ class MQTTSNBroker:
 
             # now unpack the message, only QoS 0 for now
             msg = MQTTSNMessagePublish()
-            if not msg.unpack(pkt) or msg.msg_id != 0x0000:
+            if not msg.unpack(pkt[rlen:]) or msg.msg_id != 0x0000:
                 return
 
             tid = msg.topic_id
@@ -322,7 +322,7 @@ class MQTTSNBroker:
 
         # else, add it
         for idx in range(MQTTSN_MAX_BROKER_TOPICS):
-            if self.topics[idx].name == '':
+            if not self.topics[idx].name:
                 self.topics[idx].name = name
                 self.topics[idx].tid = idx + 1
                 return self.topics[idx].tid
@@ -409,10 +409,12 @@ class MQTTSNBroker:
         # construct suback response
         reply = MQTTSNMessageSuback()
         reply.msg_id = msg.msg_id
+        reply.return_code = MQTTSN_RC_ACCEPTED
 
         # try to add the topic to the instance
-        tid = clnt.add_sub_topic(msg.topic_id_name, msg.flags)
-        if tid == 0:
+        # get an ID and try to add the topic to the instance
+        tid = self._get_topic_id(msg.topic_id_name)
+        if not clnt.add_sub_topic(tid, msg.flags):
             reply.return_code = MQTTSN_RC_CONGESTION
         else:
             reply.topic_id = tid
@@ -472,12 +474,14 @@ class MQTTSNBroker:
     def _handle_mqtt_conn(self, conn_state: bool):
         # now we know we're no longer connected to MQTT broker
         if not conn_state:
+            print('MQTT disconnected.')
             self.connected = False
             return
 
         if self.connected:
             return
 
+        print('MQTT connected.')
         # now that we just reconnected to MQTT broker,
         # re-subscribe to all sub topics of all our MQTT-SN clients
         self.connected = True
@@ -488,13 +492,15 @@ class MQTTSNBroker:
 
     def _handle_mqtt_publish(self, topic: bytes, payload: bytes, flags: MQTTSNFlags):
         # adapt for qos 1 later with msg id
-        
+
+        print('Topic: {}, Data: {}'.format(topic, payload))
+
         # create a message and format it
         msg = MQTTSNMessagePublish()
         
         msg.data = payload
         topic_id = self._get_topic_id(topic)
-        
+
         if topic_id == 0:
             return 
         

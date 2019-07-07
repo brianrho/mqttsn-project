@@ -2,7 +2,7 @@ from mqtt_client import MQTTClient
 import paho.mqtt.client as mqtt
 import socket
 import time
-from structures import MQTTSNFlags
+from mqttsn_messages import MQTTSNFlags
 
 
 class MQTTClientPaho(MQTTClient):
@@ -48,11 +48,11 @@ class MQTTClientPaho(MQTTClient):
         self.client.unsubscribe(topic)
 
     # called whenever we get a PUBLISH message
-    def message_cb(self, userdata, message: mqtt.MQTTMessage):
+    def message_cb(self, client, userdata, message: mqtt.MQTTMessage):
         flags = MQTTSNFlags()
         flags.retain = message.retain
         flags.qos = message.qos
-        self.broker_msg_cb(message.topic, message.payload, flags)
+        self.broker_msg_cb(message.topic.encode(), message.payload, flags)
 
     # called whenever we have a conn/disconn event
     def connect_cb(self, client, userdata, flags, rc):

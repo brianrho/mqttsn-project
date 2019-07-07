@@ -1,6 +1,6 @@
 from mqttsn_transport_udp import MQTTSNTransportUDP
-from mqttsn_client import MQTTSNClient, MQTTSNState, MQTTSNGWInfo
-from structures import MQTTSNPubTopic, MQTTSNSubTopic
+from mqttsn_client import MQTTSNClient, MQTTSNState, MQTTSNGWInfo, MQTTSNPubTopic, MQTTSNSubTopic
+from mqttsn_messages import MQTTSNFlags
 import time
 
 # list of gateways
@@ -8,7 +8,7 @@ gateways = [MQTTSNGWInfo(1, b'\x01')]
 
 # setup transport info
 port = 20000
-transport = MQTTSNTransportUDP(port, b'\x02')
+transport = MQTTSNTransportUDP(port, b'\x04')
 
 print("Starting client.")
 
@@ -24,6 +24,15 @@ while not clnt.is_connected() or clnt.state == MQTTSNState.CONNECTING:
 # pub and sub topics
 sub_topics = [MQTTSNSubTopic(b'button')]
 pub_topics = [MQTTSNPubTopic(b'led')]
+
+
+def message_callback(topic: bytes, data: bytes, flags: MQTTSNFlags):
+    out = 'Topic: {}, Data: {}, Flags: {}'.format(topic, data, flags.union)
+    print(out)
+
+
+# register callback for incoming publish
+clnt.on_message(message_callback)
 
 
 def init_tasks():

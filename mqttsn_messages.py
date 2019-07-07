@@ -21,26 +21,13 @@ MSG_TYPE_NAMES = ["ADVERTISE", "SEARCHGW", "GWINFO", "reserved",
                   "WILLMSGUPD", "WILLMSGRESP"]
 
 TOPIC_TYPE_NAMES = ["NORMAL", "PREDEFINED", "SHORT_NAME"]
-TOPIC_NORMAL, TOPIC_PREDEFINED, TOPIC_SHORTNAME = range(3)
+MQTTSN_TOPIC_NORMAL, MQTTSN_TOPIC_PREDEFINED, MQTTSN_TOPIC_SHORTNAME = range(3)
 
 # return codes
 MQTTSN_RC_ACCEPTED = 0x00
 MQTTSN_RC_CONGESTION = 0x01
 MQTTSN_RC_INVALIDTID = 0x02
 MQTTSN_RC_NOTSUPPORTED = 0x03
-
-
-class MQTTSNPubTopic:
-    def __init__(self, name, tid=0):
-        self.name = name
-        self.tid = tid
-
-
-class MQTTSNSubTopic:
-    def __init__(self, name, tid=0, flags=None):
-        self.name = name
-        self.tid = tid
-        self.flags = flags if flags else MQTTSNFlags()
 
 
 class MQTTSNHeader:
