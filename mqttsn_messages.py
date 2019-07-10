@@ -103,7 +103,7 @@ class MQTTSNMessage:
 
     # @abc.abstractmethod
     def pack(self):
-        return self.header.pack()
+        return b''
 
     # @abc.abstractmethod
     def unpack(self, buffer):
@@ -144,19 +144,19 @@ class MQTTSNMessageAdvertise(MQTTSNMessage):
 
 
 class MQTTSNMessageSearchGW(MQTTSNMessage):
-    def __init__(self, radius=1):
+    def __init__(self, radius=0):
         super().__init__()
         self.radius = radius
 
     def pack(self):
         header = MQTTSNHeader(SEARCHGW)
-        msg = header.pack(2)
-        msg += struct.pack(">H", self.radius)
+        msg = header.pack(1)
+        msg += struct.pack("B", self.radius)
         return msg
 
     def unpack(self, buffer):
         try:
-            self.radius = struct.unpack(">H", buffer)[0]
+            self.radius = struct.unpack("B", buffer)[0]
             return True
         except struct.error:
             return False
@@ -370,7 +370,7 @@ class MQTTSNMessageSubscribe(MQTTSNMessage):
 
 
 class MQTTSNMessageSuback(MQTTSNMessage):
-    def __init__(self, return_code=0x00):
+    def __init__(self, return_code=MQTTSN_RC_ACCEPTED):
         super().__init__()
         self.flags = MQTTSNFlags()
         self.topic_id = 0

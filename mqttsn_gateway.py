@@ -6,6 +6,7 @@ from mqtt_client import MQTTClient
 from enum import IntEnum, unique
 import time
 import collections
+import logging
 
 
 class MQTTSNInstancePubTopic:
@@ -174,9 +175,9 @@ class MQTTSNTopicMapping:
         self.type = ttype
 
 
-class MQTTSNBroker:
+class MQTTSNGateway:
     # for holding the broker's list of topic ID mappings
-    topics: List[MQTTSNTopicMapping] = [MQTTSNTopicMapping() for _ in range(MQTTSN_MAX_BROKER_TOPICS)]
+    topics: List[MQTTSNTopicMapping] = [MQTTSNTopicMapping() for _ in range(MQTTSN_MAX_GATEWAY_TOPICS)]
 
     # list of clients
     clients: List[MQTTSNInstance] = [MQTTSNInstance() for _ in range(MQTTSN_MAX_NUM_CLIENTS)]
@@ -221,6 +222,7 @@ class MQTTSNBroker:
         # check keepalive and inflight messages
         for clnt in self.clients:
             if clnt and clnt.check_status() == MQTTSNInstanceStatus.LOST:
+                logging.debug('Client {} lost'.format(clnt.address))
                 clnt.deregister()
 
         # now distribute any pending publish msgs
@@ -269,8 +271,6 @@ class MQTTSNBroker:
             if idx >= len(self.msg_handlers) or self.msg_handlers[idx] is None:
                 continue
 
-            print("Got something: ", pkt)
-
             # call the msg handler
             self.msg_handlers[idx](pkt[rlen:], from_addr)
 
@@ -279,16 +279,22 @@ class MQTTSNBroker:
         if not msg.unpack(pkt):
             return
 
+        logging.debug('SEARCHGW from {}'.format(from_addr))
+
         reply = MQTTSNMessageGWInfo()
         reply.id = self.gw_id
         raw = reply.pack()
         self.transport.broadcast(raw)
+
+        logging.debug('GWINFO broadcast.')
         return
 
     def _handle_connect(self, pkt, from_addr):
         msg = MQTTSNMessageConnect()
         if not msg.unpack(pkt) or not msg.client_id:
             return
+
+        logging.info('CONNECT from {}'.format(from_addr))
 
         # prepare connack
         reply = MQTTSNMessageConnack()
@@ -316,12 +322,12 @@ class MQTTSNBroker:
 
     def _get_topic_id(self, name):
         # check if we already have that topic
-        for idx in range(MQTTSN_MAX_BROKER_TOPICS):
+        for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
             if self.topics[idx].name == name:
                 return self.topics[idx].tid
 
         # else, add it
-        for idx in range(MQTTSN_MAX_BROKER_TOPICS):
+        for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
             if not self.topics[idx].name:
                 self.topics[idx].name = name
                 self.topics[idx].tid = idx + 1
@@ -331,7 +337,7 @@ class MQTTSNBroker:
 
     def _get_topic_name(self, tid):
         # check if we already have that topic
-        for idx in range(MQTTSN_MAX_BROKER_TOPICS):
+        for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
             if self.topics[idx].tid == tid:
                 return self.topics[idx].name
 
@@ -354,6 +360,7 @@ class MQTTSNBroker:
         if not msg.unpack(pkt) or msg.topic_id != 0x0000:
             return
 
+        logging.debug('REGISTER {} from {}.'.format(msg.topic_name, from_addr))
         clnt.mark_time()
 
         # construct regack response
@@ -363,6 +370,9 @@ class MQTTSNBroker:
 
         # get an ID and try to add the topic to the instance
         tid = self._get_topic_id(msg.topic_name)
+        if not tid:
+            return
+
         if not clnt.add_pub_topic(tid):
             reply.return_code = MQTTSN_RC_CONGESTION
         else:
@@ -385,6 +395,11 @@ class MQTTSNBroker:
         # get the topic name
         topic_name = self._get_topic_name(msg.topic_id)
 
+        logging.debug('PUBLISH {} to topic {} from {}.'.format(msg.data, topic_name, from_addr))
+
+        if not topic_name:
+            return
+
         # if we're connected to the MQTT broker, just pass on the PUBLISH
         if self.mqttc and self.connected:
             self.mqttc.publish(topic_name, msg.data, msg.flags.qos, msg.flags.retain)
@@ -399,13 +414,14 @@ class MQTTSNBroker:
         if not clnt:
             return
 
-        clnt.last_in = time.time()
-
         # unpack the msg
         msg = MQTTSNMessageSubscribe()
         if not msg.unpack(pkt):
             return
 
+        clnt.mark_time()
+        logging.debug('SUBSCRIBE to topic {} from {}.'.format(msg.topic_id_name, from_addr))
+        
         # construct suback response
         reply = MQTTSNMessageSuback()
         reply.msg_id = msg.msg_id
@@ -414,6 +430,9 @@ class MQTTSNBroker:
         # try to add the topic to the instance
         # get an ID and try to add the topic to the instance
         tid = self._get_topic_id(msg.topic_id_name)
+        if not tid:
+            return
+
         if not clnt.add_sub_topic(tid, msg.flags):
             reply.return_code = MQTTSN_RC_CONGESTION
         else:
@@ -432,19 +451,25 @@ class MQTTSNBroker:
         if not clnt:
             return
 
-        clnt.mark_time()
-
         # unpack the msg
         msg = MQTTSNMessageUnsubscribe()
         if not msg.unpack(pkt):
             return
 
+        clnt.mark_time()
+        logging.debug('UNSUBSCRIBE to topic {} from {}.'.format(msg.topic_id_name, from_addr))
+
         # construct unsuback response
         reply = MQTTSNMessageUnsuback()
         reply.msg_id = msg.msg_id
 
+        # get the topic ID first
+        tid = self._get_topic_id(msg.topic_id_name)
+        if not tid:
+            return
+
         # try to remove the topic from the instance
-        if not clnt.delete_sub_topic(msg.topic_id_name):
+        if not clnt.delete_sub_topic(tid):
             return
 
         # now send our reply
@@ -465,6 +490,7 @@ class MQTTSNBroker:
             return
 
         clnt.mark_time()
+        logging.debug('PINGREQ from {}'.format(from_addr))
 
         # now send our reply
         reply = MQTTSNMessagePingresp()
@@ -474,14 +500,14 @@ class MQTTSNBroker:
     def _handle_mqtt_conn(self, conn_state: bool):
         # now we know we're no longer connected to MQTT broker
         if not conn_state:
-            print('MQTT disconnected.')
+            logging.debug('MQTT disconnected.')
             self.connected = False
             return
 
         if self.connected:
             return
 
-        print('MQTT connected.')
+        logging.debug('MQTT connected.')
         # now that we just reconnected to MQTT broker,
         # re-subscribe to all sub topics of all our MQTT-SN clients
         self.connected = True
@@ -493,7 +519,7 @@ class MQTTSNBroker:
     def _handle_mqtt_publish(self, topic: bytes, payload: bytes, flags: MQTTSNFlags):
         # adapt for qos 1 later with msg id
 
-        print('Topic: {}, Data: {}'.format(topic, payload))
+        logging.debug('MQTT-PUBLISH {} to {}'.format(payload, topic))
 
         # create a message and format it
         msg = MQTTSNMessagePublish()

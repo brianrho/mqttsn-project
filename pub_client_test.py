@@ -2,6 +2,11 @@ from mqttsn_transport_udp import MQTTSNTransportUDP
 from mqttsn_client import MQTTSNClient, MQTTSNState, MQTTSNGWInfo, MQTTSNPubTopic, MQTTSNSubTopic
 from mqttsn_messages import MQTTSNFlags
 import time
+import logging
+import sys
+
+
+logging.basicConfig(stream=sys.stdout, format='[+]%(message)s', level=logging.DEBUG)
 
 # list of gateways
 gateways = [MQTTSNGWInfo(1, b'\x01')]
