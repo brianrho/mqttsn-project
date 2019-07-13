@@ -217,7 +217,7 @@ class MQTTSNClient:
             # if no gateway was provided, select any available gateway
             logging.debug('Selecting gateway automatically.')
             for i in range(self.num_gateways):
-                if self.gateways[i].available:
+                if self.gateways[i].gwid and self.gateways[i].available:
                     self.curr_gateway = self.gateways[i]
                     break
             else:
@@ -225,7 +225,14 @@ class MQTTSNClient:
                 for i in range(self.num_gateways):
                     self.gateways[i].available = True
 
-                self.curr_gateway = self.gateways[0]
+                # try to search again for a valid gw
+                for i in range(self.num_gateways):
+                    if self.gateways[i].gwid:
+                        self.curr_gateway = self.gateways[0]
+                        break
+                else:
+                    self.msg_inflight = None
+                    return False
 
         # send the msg to the gw, start timers
         self.transport.write_packet(self.msg_inflight, self.curr_gateway.gwaddr)

@@ -23,8 +23,8 @@ class MQTTSNInstanceSubTopic:
 @unique
 class MQTTSNInstanceStatus(IntEnum):
     ACTIVE = 1
-    DISCONNECTED = 3
-    LOST = 4
+    DISCONNECTED = 2
+    LOST = 3
 
 
 class MQTTSNInstance:

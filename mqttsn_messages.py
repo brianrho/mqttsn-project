@@ -245,6 +245,8 @@ class MQTTSNMessageRegister(MQTTSNMessage):
         fixed_len = MQTTSN_HEADER_LEN + 2 + 2
         self.topic_name = self.topic_name[:MQTTSN_MAX_MSG_LEN - fixed_len]
 
+        # TODO: check result of header.pack()
+        # so we can eliminate MQTTSN_MAX_MSG_LEN usage
         msg = header.pack(2 + 2 + len(self.topic_name))
         msg += struct.pack(">HH{}s".format(len(self.topic_name)), self.topic_id,
                            self.msg_id, self.topic_name)
