@@ -25,6 +25,7 @@ clnt.connect(gwid=1)
 # wait till we're connected
 while not clnt.is_connected() or clnt.state == MQTTSNState.CONNECTING:
     time.sleep(0.05)
+    clnt.loop()
 
 # pub and sub topics
 sub_topics = [MQTTSNSubTopic(b'led')]

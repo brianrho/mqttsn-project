@@ -9,6 +9,11 @@ MQTTSN_MAX_MSG_LEN = 32
 MQTTSN_HEADER_LEN = 2
 MQTTSN_MAX_CLIENTID_LEN = 23
 
+# Unassigned topic IDs set to 0 for convenience,
+# Unsubscribed topics set to max value
+MQTTSN_TOPIC_NOTASSIGNED = 0x0000
+MQTTSN_TOPIC_UNSUBSCRIBED = 0xFFFF
+
 # in seconds
 MQTTSN_DEFAULT_KEEPALIVE = 30
 
@@ -18,6 +23,7 @@ MQTTSN_N_RETRY = 3
 
 # in seconds
 MQTTSN_T_SEARCHGW = 5
+MQTTSN_MAX_T_SEARCHGW = 300
 
 #############################
 # For gateways
