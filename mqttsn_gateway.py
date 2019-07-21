@@ -115,19 +115,14 @@ class MQTTSNInstance:
             if self.sub_topics[i].tid == tid:
                 self.sub_topics[i].tid = 0
                 self.sub_topics[i].flags = None
-                return True
-
-        # return true anyways so we can re-send unsuback if it got lost
-        return False
+                return
 
     # no real use for this yet
     def delete_pub_topic(self, tid):
         for i in range(MQTTSN_MAX_INSTANCE_TOPICS):
             if self.pub_topics[i].tid == tid:
                 self.pub_topics[i].tid = 0
-                return True
-        else:
-            return False
+                return
 
     # check if we're subbed to a topic
     def is_subbed(self, tid):
@@ -173,11 +168,13 @@ class MQTTSNTopicMapping:
         self.name = name
         self.tid = tid
         self.type = ttype
+        self.subbed = False
+        self.sub_qos = 0
 
 
 class MQTTSNGateway:
     # for holding the broker's list of topic ID mappings
-    topics: List[MQTTSNTopicMapping] = [MQTTSNTopicMapping() for _ in range(MQTTSN_MAX_GATEWAY_TOPICS)]
+    mappings: List[MQTTSNTopicMapping] = [MQTTSNTopicMapping() for _ in range(MQTTSN_MAX_GATEWAY_TOPICS)]
 
     # list of clients
     clients: List[MQTTSNInstance] = [MQTTSNInstance() for _ in range(MQTTSN_MAX_NUM_CLIENTS)]
@@ -241,7 +238,7 @@ class MQTTSNGateway:
             # now unpack the message, only QoS 0 for now
             msg = MQTTSNMessagePublish()
             if not msg.unpack(pkt[rlen:]) or msg.msg_id != 0x0000:
-                return
+                continue
 
             tid = msg.topic_id
             for clnt in self.clients:
@@ -287,7 +284,6 @@ class MQTTSNGateway:
         self.transport.broadcast(raw)
 
         logging.debug('GWINFO broadcast.')
-        return
 
     def _handle_connect(self, pkt, from_addr):
         msg = MQTTSNMessageConnect()
@@ -323,29 +319,34 @@ class MQTTSNGateway:
     def _get_topic_id(self, name):
         # check if we already have that topic
         for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
-            if self.topics[idx].name == name:
-                return self.topics[idx].tid
-
+            if self.mappings[idx].name == name:
+                return self.mappings[idx].tid
+                
+        if len(name) > MQTTSN_MAX_TOPICNAME_LEN:
+            return 0;
+            
         # else, add it
         for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
-            if not self.topics[idx].name:
-                self.topics[idx].name = name
-                self.topics[idx].tid = idx + 1
-                return self.topics[idx].tid
+            if not self.mappings[idx].name:
+                self.mappings[idx].name = name
+                self.mappings[idx].tid = idx + 1
+                while self.mappings[idx].tid in (MQTTSN_TOPIC_UNSUBSCRIBED, MQTTSN_TOPIC_NOTASSIGNED):
+                    self.mappings[idx].tid += 1
+                return self.mappings[idx].tid
 
         return 0
 
-    def _get_topic_name(self, tid):
+    def get_topic_mapping(self, tid):
         # check if we already have that topic
         for idx in range(MQTTSN_MAX_GATEWAY_TOPICS):
-            if self.topics[idx].tid == tid:
-                return self.topics[idx].name
+            if self.mappings[idx].tid == tid:
+                return self.mappings[idx]
 
-        return b''
+        return None
 
     def _get_instance(self, addr):
         for clnt in self.clients:
-            if clnt.address == addr:
+            if clnt and clnt.address == addr:
                 return clnt
 
         return None
@@ -393,20 +394,19 @@ class MQTTSNGateway:
             return
 
         # get the topic name
-        topic_name = self._get_topic_name(msg.topic_id)
-
-        logging.debug('PUBLISH {} to topic {} from {}.'.format(msg.data, topic_name, from_addr))
-
-        if not topic_name:
+        mapping = self.get_topic_mapping(msg.topic_id)
+        if not mapping:
             return
+
+        logging.debug('PUBLISH {} to topic {} from {}.'.format(msg.data, mapping.name, from_addr))
 
         # if we're connected to the MQTT broker, just pass on the PUBLISH
         if self.mqttc and self.connected:
-            self.mqttc.publish(topic_name, msg.data, msg.flags.qos, msg.flags.retain)
+            self.mqttc.publish(mapping.name, msg.data, msg.flags.qos, msg.flags.retain)
         else:
             # else we're on our own, add the msg to our queue
             # so we'll distribute it locally as broker
-            self.pub_queue.append(pkt)
+            self.pub_queue.append(msg.pack())
 
     def _handle_subscribe(self, pkt, from_addr):
         # get the right instance for this client
@@ -427,12 +427,13 @@ class MQTTSNGateway:
         reply.msg_id = msg.msg_id
         reply.return_code = MQTTSN_RC_ACCEPTED
 
-        # try to add the topic to the instance
-        # get an ID and try to add the topic to the instance
+        # get an ID
         tid = self._get_topic_id(msg.topic_id_name)
         if not tid:
             return
 
+        reply.return_code = MQTTSN_RC_ACCEPTED
+        # add the topic to the instance
         if not clnt.add_sub_topic(tid, msg.flags):
             reply.return_code = MQTTSN_RC_CONGESTION
         else:
@@ -442,9 +443,31 @@ class MQTTSNGateway:
         raw = reply.pack()
         self.transport.write_packet(raw, from_addr)
 
-        # here we issue our subscribe to MQTT clnt
-        if self.mqttc:
-            self.mqttc.subscribe(msg.topic_id_name, msg.flags.qos)
+        # send the new sub to MQTT broker
+        if reply.return_code == MQTTSN_RC_ACCEPTED:
+            self.add_subscription(tid, msg.flags.qos)
+
+    def add_subscription(self, tid, qos):
+        mapping = self.get_topic_mapping(tid)
+
+        # if there's no MQTT sub yet
+        if not mapping.subbed:
+            mapping.subbed = True
+            mapping.sub_qos = qos
+            if self.mqttc and self.connected:
+                self.mqttc.subscribe(mapping.name, qos)
+        # or if the new sub has a higher qos
+        elif mapping.sub_qos < qos:
+            mapping.sub_qos = qos
+            if self.mqttc and self.connected:
+                self.mqttc.subscribe(mapping.name, qos)
+
+    def delete_subscription(self, tid):
+        mapping = self.get_topic_mapping(tid)
+        mapping.subbed = False
+        mapping.sub_qos = 0
+        if self.mqttc and self.connected:
+            self.mqttc.unsubscribe(mapping.name)
 
     def _handle_unsubscribe(self, pkt, from_addr):
         clnt = self._get_instance(from_addr)
@@ -468,17 +491,20 @@ class MQTTSNGateway:
         if not tid:
             return
 
-        # try to remove the topic from the instance
-        if not clnt.delete_sub_topic(tid):
-            return
+        # delete the topic from the instance
+        clnt.delete_sub_topic(tid)
 
         # now send our reply
         raw = reply.pack()
         self.transport.write_packet(raw, from_addr)
 
-        # here we issue our unsubscribe to MQTT clnt
-        if self.mqttc:
-            self.mqttc.unsubscribe(msg.topic_id_name)
+        # check if anybody's still subscribed
+        for clnt in self.clients:
+            if clnt.is_subbed(tid):
+                return
+
+        # if not, delete the sub from MQTT broker
+        self.delete_subscription(tid)
 
     def _handle_pingreq(self, pkt, from_addr):
         clnt = self._get_instance(from_addr)
@@ -511,10 +537,9 @@ class MQTTSNGateway:
         # now that we just reconnected to MQTT broker,
         # re-subscribe to all sub topics of all our MQTT-SN clients
         self.connected = True
-        for clnt in self.clients:
-            for topic in clnt.sub_topics:
-                topic_name = self._get_topic_name(topic.tid)
-                self.mqttc.subscribe(topic_name, topic.flags.qos)
+        for mapping in self.mappings:
+            if mapping.subbed:
+                self.mqttc.subscribe(mapping.name, mapping.sub_qos)
 
     def _handle_mqtt_publish(self, topic: bytes, payload: bytes, flags: MQTTSNFlags):
         # adapt for qos 1 later with msg id
